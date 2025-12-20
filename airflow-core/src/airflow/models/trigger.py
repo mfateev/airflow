@@ -32,6 +32,7 @@ from sqlalchemy.sql.functions import coalesce
 from airflow._shared.timezones import timezone
 from airflow.assets.manager import AssetManager
 from airflow.configuration import conf
+from temporal_airflow.time_provider import get_current_time
 from airflow.models import Callback
 from airflow.models.asset import AssetWatcherModel
 from airflow.models.base import Base
@@ -307,7 +308,7 @@ class Trigger(Base):
             task_instance.trigger_id = None
             # Finally, mark it as scheduled so it gets re-queued
             task_instance.state = TaskInstanceState.SCHEDULED
-            task_instance.scheduled_dttm = timezone.utcnow()
+            task_instance.scheduled_dttm = get_current_time()
 
     @classmethod
     @provide_session
@@ -433,7 +434,7 @@ def handle_event_submit(event: TriggerEvent, *, task_instance: TaskInstance, ses
 
     # Set the state of the task instance to scheduled
     task_instance.state = TaskInstanceState.SCHEDULED
-    task_instance.scheduled_dttm = timezone.utcnow()
+    task_instance.scheduled_dttm = get_current_time()
     session.flush()
 
 

@@ -69,6 +69,7 @@ from sqlalchemy_utils import UUIDType
 from airflow import settings
 from airflow._shared.timezones import timezone
 from airflow.assets.manager import asset_manager
+from temporal_airflow.time_provider import get_current_time
 from airflow.configuration import conf
 from airflow.listeners.listener import get_listener_manager
 from airflow.models.asset import AssetEvent, AssetModel
@@ -276,7 +277,7 @@ def clear_task_instances(
         for dr in drs:
             if dr.state in State.finished_dr_states:
                 dr.state = dag_run_state
-                dr.start_date = timezone.utcnow()
+                dr.start_date = get_current_time()
                 if run_on_latest_version:
                     dr_dag = scheduler_dagbag.get_latest_version_of_dag(dr.dag_id, session=session)
                     dag_version = DagVersion.get_latest_version(dr.dag_id, session=session)
@@ -300,7 +301,7 @@ def clear_task_instances(
                     dr.last_scheduling_decision = None
                     dr.start_date = None
                     dr.clear_number += 1
-                    dr.queued_at = timezone.utcnow()
+                    dr.queued_at = get_current_time()
     session.flush()
 
 
@@ -766,7 +767,7 @@ class TaskInstance(Base, LoggingMixin):
         if self.state == state:
             return False
 
-        current_time = timezone.utcnow()
+        current_time = get_current_time()
         self.log.debug("Setting task state for %s to %s", self, state)
         if self not in session:
             self.refresh_from_db(session)
@@ -990,7 +991,7 @@ class TaskInstance(Base, LoggingMixin):
 
     def ready_for_retry(self) -> bool:
         """Check on whether the task instance is in the right state and timeframe to be retried."""
-        return self.state == TaskInstanceState.UP_FOR_RETRY and self.next_retry_datetime() < timezone.utcnow()
+        return self.state == TaskInstanceState.UP_FOR_RETRY and self.next_retry_datetime() < get_current_time()
 
     @staticmethod
     def _get_dagrun(dag_id, run_id, session) -> DagRun:
@@ -1103,7 +1104,7 @@ class TaskInstance(Base, LoggingMixin):
             # Set the task start date. In case it was re-scheduled use the initial
             # start date that is recorded in task_reschedule table
             # If the task continues after being deferred (next_method is set), use the original start_date
-            ti.start_date = ti.start_date if ti.next_method else timezone.utcnow()
+            ti.start_date = ti.start_date if ti.next_method else get_current_time()
             if ti.state == TaskInstanceState.UP_FOR_RESCHEDULE:
                 tr_start_date = session.scalar(
                     TR.stmt_for_task_instance(ti, descending=False).with_only_columns(TR.start_date).limit(1)
@@ -1132,7 +1133,7 @@ class TaskInstance(Base, LoggingMixin):
                     ti.try_number,
                     ti.max_tries + 1,
                 )
-                ti.queued_dttm = timezone.utcnow()
+                ti.queued_dttm = get_current_time()
                 session.merge(ti)
                 session.commit()
                 return False
@@ -1226,7 +1227,7 @@ class TaskInstance(Base, LoggingMixin):
                     self.task_id,
                 )
                 return
-            timing = timezone.utcnow() - self.queued_dttm
+            timing = get_current_time() - self.queued_dttm
         elif new_state == TaskInstanceState.QUEUED:
             metric_name = "scheduled_duration"
             if self.scheduled_dttm is None:
@@ -1236,7 +1237,7 @@ class TaskInstance(Base, LoggingMixin):
                     self.task_id,
                 )
                 return
-            timing = timezone.utcnow() - self.scheduled_dttm
+            timing = get_current_time() - self.scheduled_dttm
         else:
             raise NotImplementedError("no metric emission setup for state %s", new_state)
 
@@ -1534,7 +1535,7 @@ class TaskInstance(Base, LoggingMixin):
         if not test_mode:
             ti.refresh_from_db(session)
 
-        ti.end_date = timezone.utcnow()
+        ti.end_date = get_current_time()
         ti.set_duration()
 
         Stats.incr(f"operator_failures_{ti.operator}", tags=ti.stats_tags)

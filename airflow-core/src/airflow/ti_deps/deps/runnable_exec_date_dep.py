@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from airflow._shared.timezones import timezone
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
+from temporal_airflow.time_provider import get_current_time
 from airflow.utils.session import provide_session
 
 
@@ -34,7 +35,7 @@ class RunnableExecDateDep(BaseTIDep):
         if logical_date is None:
             return
 
-        cur_date = timezone.utcnow()
+        cur_date = get_current_time()
 
         if logical_date > cur_date:
             yield self._failing_status(

@@ -21,6 +21,7 @@ from airflow._shared.timezones import timezone
 from airflow.models.taskreschedule import TaskReschedule
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
 from airflow.utils.session import provide_session
+from temporal_airflow.time_provider import get_current_time
 from airflow.utils.state import TaskInstanceState
 
 
@@ -76,7 +77,7 @@ class ReadyToRescheduleDep(BaseTIDep):
             yield self._passing_status(reason="There is no reschedule request for this task instance.")
             return
 
-        now = timezone.utcnow()
+        now = get_current_time()
         if now >= next_reschedule_date:
             yield self._passing_status(reason="Task instance id ready for reschedule.")
             return

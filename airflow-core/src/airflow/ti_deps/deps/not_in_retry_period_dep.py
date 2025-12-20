@@ -20,6 +20,7 @@ from __future__ import annotations
 from airflow._shared.timezones import timezone
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
 from airflow.utils.session import provide_session
+from temporal_airflow.time_provider import get_current_time
 from airflow.utils.state import TaskInstanceState
 
 
@@ -44,7 +45,7 @@ class NotInRetryPeriodDep(BaseTIDep):
 
         # Calculate the date first so that it is always smaller than the timestamp used by
         # ready_for_retry
-        cur_date = timezone.utcnow()
+        cur_date = get_current_time()
         next_task_retry_date = ti.next_retry_datetime()
         if ti.is_premature:
             yield self._failing_status(
