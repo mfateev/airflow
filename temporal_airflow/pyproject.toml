@@ -1,0 +1,13 @@
+[project]
+name = "temporal-airflow"
+version = "0.1.0"
+description = "Temporal integration for Apache Airflow"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
