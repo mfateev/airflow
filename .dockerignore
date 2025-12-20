@@ -39,6 +39,7 @@
 !task-sdk/
 !airflow-ctl/
 !go-sdk/
+!temporal_airflow/
 
 # Add all "test" distributions
 !tests

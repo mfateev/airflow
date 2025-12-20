@@ -866,6 +866,7 @@ function install_from_sources() {
         echo
         installation_command_flags=" --editable .[${AIRFLOW_EXTRAS}] \
               --editable ./airflow-core --editable ./task-sdk --editable ./airflow-ctl \
+              --editable ./temporal_airflow \
               --editable ./kubernetes-tests --editable ./docker-tests --editable ./helm-tests \
               --editable ./task-sdk-integration-tests \
               --editable ./airflow-ctl-tests \
