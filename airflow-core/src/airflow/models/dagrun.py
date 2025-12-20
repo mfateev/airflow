@@ -57,6 +57,7 @@ from sqlalchemy.sql.functions import coalesce
 from sqlalchemy_utils import UUIDType
 
 from airflow._shared.timezones import timezone
+from temporal_airflow.time_provider import get_current_time
 from airflow.callbacks.callback_requests import DagCallbackRequest, DagRunContext
 from airflow.configuration import conf as airflow_conf
 from airflow.exceptions import AirflowException, NotMapped, TaskNotFound
@@ -610,7 +611,8 @@ class DagRun(Base, LoggingMixin):
             .limit(cls.DEFAULT_DAGRUNS_TO_EXAMINE)
         )
 
-        query = query.where(DagRun.run_after <= func.now())
+        current_time = get_current_time()
+        query = query.where(DagRun.run_after <= current_time)
 
         result = session.scalars(with_row_locks(query, of=cls, session=session, skip_locked=True)).unique()
         return result
@@ -696,7 +698,8 @@ class DagRun(Base, LoggingMixin):
             .limit(cls.DEFAULT_DAGRUNS_TO_EXAMINE)
         )
 
-        query = query.where(DagRun.run_after <= func.now())
+        current_time = get_current_time()
+        query = query.where(DagRun.run_after <= current_time)
 
         return session.scalars(with_row_locks(query, of=cls, session=session, skip_locked=True))
 
@@ -1179,7 +1182,7 @@ class DagRun(Base, LoggingMixin):
             def recalculate(self) -> _UnfinishedStates:
                 return self._replace(tis=[t for t in self.tis if t.state in State.unfinished])
 
-        start_dttm = timezone.utcnow()
+        start_dttm = get_current_time()
         self.last_scheduling_decision = start_dttm
         with (
             Stats.timer(f"dagrun.dependency-check.{self.dag_id}"),
@@ -2083,7 +2086,7 @@ class DagRun(Base, LoggingMixin):
                     .where(TI.id.in_(id_chunk))
                     .values(
                         state=TaskInstanceState.SCHEDULED,
-                        scheduled_dttm=timezone.utcnow(),
+                        scheduled_dttm=get_current_time(),
                         try_number=case(
                             (
                                 or_(TI.state.is_(None), TI.state != TaskInstanceState.UP_FOR_RESCHEDULE),
@@ -2105,8 +2108,8 @@ class DagRun(Base, LoggingMixin):
                     .where(TI.id.in_(id_chunk))
                     .values(
                         state=TaskInstanceState.SUCCESS,
-                        start_date=timezone.utcnow(),
-                        end_date=timezone.utcnow(),
+                        start_date=get_current_time(),
+                        end_date=get_current_time(),
                         duration=0,
                         try_number=TI.try_number + 1,
                     )
