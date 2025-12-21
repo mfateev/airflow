@@ -50,13 +50,18 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
 
         activity.logger.info(f"Built execution context for {input.task_id}")
 
-        # TODO: Execute task
-        result = None
+        # Execute task ✨
+        result = task.execute(context=context)
 
-        # TODO: Capture XCom pushes
-        xcom_data = None
+        # Capture XCom pushes
+        xcom_data = {"return_value": result} if result is not None else None
 
         end_time = datetime.utcnow()
+
+        activity.logger.info(
+            f"Task completed successfully: {input.dag_id}.{input.task_id} "
+            f"(duration: {(end_time - start_time).total_seconds()}s)"
+        )
 
         return TaskExecutionResult(
             dag_id=input.dag_id,
