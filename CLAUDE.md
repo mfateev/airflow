@@ -281,6 +281,54 @@ pytest airflow-core/tests/ -m "not db_test"  # Skip database tests
 - **Kubernetes tests** - K8s deployment and KubernetesPodOperator tests
 - **Helm tests** - Helm chart rendering verification
 
+### Testing Temporal Integration
+
+This repository includes an experimental Temporal integration (`temporal_airflow/`) that integrates Airflow with Temporal workflows. When working on Temporal-related code, use these testing procedures:
+
+**Quick Test (Using Skill):**
+```bash
+# Run all temporal tests and regression tests
+/test-temporal
+```
+
+**Manual Testing with Breeze:**
+```bash
+# Verify temporal_airflow installation
+breeze shell --python 3.10 -c "python -c 'from temporal_airflow.time_provider import get_current_time; print(\"✓ temporal_airflow installed\")'"
+
+# Verify Airflow integration (no import conflicts)
+breeze shell --python 3.10 -c "python -c 'from airflow.models.dagrun import DagRun; print(\"✓ dagrun imports successfully\")'"
+
+# Run all temporal_airflow tests
+breeze shell --python 3.10 -c "pytest temporal_airflow/tests/ -v"
+
+# Run DagRun regression tests (verify no regressions from temporal integration)
+breeze shell --python 3.10 -c "cd /opt/airflow && pytest airflow-core/tests/unit/models/test_dagrun.py::TestDagRun -v --tb=short"
+
+# Run specific temporal test
+breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_time_provider.py -v"
+```
+
+**Test Files:**
+- `temporal_airflow/tests/test_time_provider.py` - Time provider with Temporal context injection (4 tests)
+- `temporal_airflow/tests/test_models.py` - Temporal data models (TaskExecutionInput, etc.)
+- `airflow-core/tests/unit/models/test_dagrun.py::TestDagRun` - Regression tests (62 tests)
+
+**Expected Results:**
+- ✅ All temporal_airflow tests pass (4 tests in ~1.5s)
+- ✅ All DagRun regression tests pass (62 tests in ~10s)
+- ✅ No import conflicts between temporal_airflow and airflow.models
+
+**Important Notes:**
+- Tests must run inside Breeze container using `breeze shell --python 3.10 -c "command"`
+- Use `cd /opt/airflow &&` prefix for DagRun tests to ensure correct working directory
+- If temporal_airflow is not installed, rebuild Breeze image: `breeze build-image --python 3.10 --force-build`
+
+**Documentation:**
+- Implementation plan: `/docs/temporal/TEMPORAL_IMPLEMENTATION_PLAN.md`
+- Testing guide: `/docs/temporal/TESTING_PROCEDURE.md`
+- Quick start: `/docs/temporal/TESTING_QUICK_START.md`
+
 ## Common Development Tasks
 
 ### Working with Models
