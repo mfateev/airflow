@@ -84,3 +84,42 @@ async def test_database_isolation():
             # Both should complete successfully with correct IDs
             assert results[0].dag_id == "dag1"
             assert results[1].dag_id == "dag2"
+
+
+@pytest.mark.asyncio
+async def test_dag_deserialization():
+    """Test that workflow deserializes DAG correctly."""
+    from airflow import DAG
+    from airflow.operators.python import PythonOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+
+    # Create a real DAG
+    with DAG(dag_id="test_dag", start_date=datetime(2025, 1, 1)) as dag:
+        PythonOperator(task_id="task1", python_callable=lambda: None)
+
+    # Serialize it
+    serialized = SerializedDAG.to_dict(dag)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        input_data = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag=serialized,
+        )
+
+        async with Worker(
+            env.client,
+            task_queue="test-queue",
+            workflows=[ExecuteAirflowDagWorkflow],
+            activities=[],
+        ):
+            result = await env.client.execute_workflow(
+                ExecuteAirflowDagWorkflow.run,
+                input_data,
+                id="test-dag-deser",
+                task_queue="test-queue",
+            )
+
+            # Should complete without error
+            assert result.dag_id == "test_dag"

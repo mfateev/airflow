@@ -61,7 +61,12 @@ class ExecuteAirflowDagWorkflow:
             # Phase 1: Setup (Decision 1: workflow-specific DB)
             self._initialize_database()
 
-            # TODO Commit 2: Store and deserialize DAG
+            # Commit 2: Store and deserialize DAG (Decision 3)
+            self.serialized_dag = input.serialized_dag
+            self.dag = SerializedDAG.from_dict(self.serialized_dag)
+
+            workflow.logger.info(f"Deserialized DAG: {self.dag.dag_id}")
+
             # TODO Commit 3: Create DAG run
             # TODO Commit 4-7: Scheduling loop
 
