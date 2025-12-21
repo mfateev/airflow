@@ -34,7 +34,27 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
 
         activity.logger.info(f"Deserialized task: {task.__class__.__name__}")
 
-        # TODO: Build context and execute
+        # Build minimal execution context
+        context = {
+            "dag_id": input.dag_id,
+            "task_id": input.task_id,
+            "run_id": input.run_id,
+            "logical_date": input.logical_date,
+            "try_number": input.try_number,
+            # Simple XCom pull from upstream results
+            "task_instance": type("TI", (), {
+                "xcom_pull": lambda task_ids=None, key="return_value":
+                    input.upstream_results.get(task_ids) if input.upstream_results else None
+            })(),
+        }
+
+        activity.logger.info(f"Built execution context for {input.task_id}")
+
+        # TODO: Execute task
+        result = None
+
+        # TODO: Capture XCom pushes
+        xcom_data = None
 
         end_time = datetime.utcnow()
 
@@ -46,6 +66,8 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
             state=TaskInstanceState.SUCCESS,
             start_date=start_time,
             end_date=end_time,
+            return_value=result,
+            xcom_data=xcom_data,
         )
 
     except Exception as e:
