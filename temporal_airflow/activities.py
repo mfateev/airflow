@@ -5,6 +5,7 @@ from datetime import datetime
 import structlog
 from temporalio import activity
 
+from airflow.serialization.serialized_objects import SerializedBaseOperator
 from airflow.utils.state import TaskInstanceState
 from temporal_airflow.models import TaskExecutionInput, TaskExecutionResult
 
@@ -26,17 +27,39 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
     )
 
     start_time = datetime.utcnow()
-    end_time = datetime.utcnow()
 
-    # TODO: Implement actual task execution
-    # For now, return success
+    try:
+        # Deserialize just this task (Decision 7)
+        task = SerializedBaseOperator.deserialize_operator(input.serialized_task)
 
-    return TaskExecutionResult(
-        dag_id=input.dag_id,
-        task_id=input.task_id,
-        run_id=input.run_id,
-        try_number=input.try_number,
-        state=TaskInstanceState.SUCCESS,
-        start_date=start_time,
-        end_date=end_time,
-    )
+        activity.logger.info(f"Deserialized task: {task.__class__.__name__}")
+
+        # TODO: Build context and execute
+
+        end_time = datetime.utcnow()
+
+        return TaskExecutionResult(
+            dag_id=input.dag_id,
+            task_id=input.task_id,
+            run_id=input.run_id,
+            try_number=input.try_number,
+            state=TaskInstanceState.SUCCESS,
+            start_date=start_time,
+            end_date=end_time,
+        )
+
+    except Exception as e:
+        end_time = datetime.utcnow()
+
+        activity.logger.error(f"Task failed: {input.dag_id}.{input.task_id}", exc_info=e)
+
+        return TaskExecutionResult(
+            dag_id=input.dag_id,
+            task_id=input.task_id,
+            run_id=input.run_id,
+            try_number=input.try_number,
+            state=TaskInstanceState.FAILED,
+            start_date=start_time,
+            end_date=end_time,
+            error_message=str(e),
+        )
