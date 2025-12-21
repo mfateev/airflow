@@ -3,7 +3,11 @@ name = "temporal-airflow"
 version = "0.1.0"
 description = "Temporal integration for Apache Airflow"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "pydantic>=2.0",
+    "temporalio>=1.4.0",
+    "structlog>=23.0.0",
+]
 
 [build-system]
 requires = ["hatchling"]
