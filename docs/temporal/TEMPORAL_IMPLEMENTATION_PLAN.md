@@ -456,9 +456,6 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
     start_time = datetime.utcnow()
 
     try:
-        # Send heartbeat to Temporal (indicates activity is alive)
-        activity.heartbeat()
-
         # Deserialize just this task (Decision 7)
         task = SerializedBaseOperator.deserialize_operator(input.serialized_task)
 
