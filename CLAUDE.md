@@ -1,0 +1,387 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Repository Overview
+
+Apache Airflow is a platform to programmatically author, schedule, and monitor workflows. This is a **monorepo** containing multiple independently-versioned packages organized as follows:
+
+### Core Components
+
+- **`airflow-core/`** - Core Airflow package containing scheduler, executors, API servers, and data models
+- **`task-sdk/`** - Lightweight SDK for DAG authoring and task execution runtime
+- **`airflow-ctl/`** - CLI tool for remote Airflow instance management via REST API
+- **`shared/`** - Shared code libraries (configuration, logging, observability, timezones, secrets) used across distributions via symlinks
+
+### Provider Ecosystem
+
+- **`providers/`** - 80+ independently versioned provider packages (amazon, google, microsoft, apache, etc.)
+  - Each provider follows namespace package pattern: `airflow.providers.<provider_name>`
+  - Contains operators, hooks, sensors, transfers, triggers, executors, auth managers, and secret backends
+  - Independently released from core Airflow
+
+### Supporting Packages
+
+- **`chart/`** - Official Helm chart for Kubernetes deployment
+- **`go-sdk/`** - Go language SDK
+- **`clients/python/`** - Python API client
+- **`docs/`** - Documentation source
+
+## Development Environment
+
+### Using Breeze (Recommended)
+
+Breeze is the official Docker-based development environment. It provides a consistent environment with all dependencies and integrations.
+
+**Common Breeze commands:**
+```bash
+# Enter Breeze shell (interactive development environment)
+breeze shell
+
+# Enter with specific Python version and database
+breeze shell --python 3.11 --backend postgres
+
+# Run tests
+breeze testing core-tests                    # Run all core tests
+breeze testing core-tests tests/models/      # Run specific test directory
+breeze testing providers-tests               # Run provider tests
+breeze testing task-sdk-tests                # Run task SDK tests
+
+# Run tests with specific options
+breeze testing core-tests --backend postgres --python 3.11
+breeze testing core-tests --test-type CLI    # Run only CLI tests
+breeze testing core-tests --collect-only     # List tests without running
+
+# Build images
+breeze ci-image build                        # Build CI image
+breeze shell --build-only                    # Build without entering shell
+
+# Stop and cleanup
+breeze stop                                  # Stop all Breeze containers
+breeze down                                  # Stop and remove containers
+```
+
+**Test types available:**
+- `API` - REST API tests
+- `CLI` - Command-line interface tests
+- `Core` - Core functionality tests
+- `Serialization` - DAG/task serialization tests
+- `Other` - Other unit tests
+- `All` - All tests (default)
+- `All-Postgres`, `All-MySQL` - All tests with specific database
+
+### Local Development (without Breeze)
+
+For development outside Breeze, use a local virtual environment:
+
+```bash
+# Install airflow-core in editable mode
+cd airflow-core
+pip install -e ".[devel]"
+
+# Run tests directly with pytest
+PYTHONPATH=/path/to/airflow/airflow-core/src:$PYTHONPATH pytest tests/
+
+# Run single test
+pytest tests/models/test_dag.py::TestDag::test_task_states
+```
+
+**Important:** When running tests locally, set `PYTHONPATH` to include `airflow-core/src` so imports resolve correctly.
+
+## Code Architecture
+
+### Airflow Core Architecture
+
+Located in `/airflow-core/src/airflow/`:
+
+**Execution & Scheduling:**
+- **`executors/`** - Task execution backends (LocalExecutor, workload definitions, executor loading)
+  - `base_executor.py` - Abstract base for all executors
+  - `executor_loader.py` - Dynamic executor discovery and loading
+  - Providers can add custom executors (e.g., KubernetesExecutor, CeleryExecutor)
+
+- **`jobs/`** - Long-running job processes
+  - `scheduler_job_runner.py` - Main scheduler loop (~4000 lines)
+  - `triggerer_job_runner.py` - Async trigger processing for deferrable operators
+  - `dag_processor_job_runner.py` - Coordinates DAG file parsing
+
+- **`dag_processing/`** - DAG parsing and file management
+  - `manager.py` - Orchestrates DAG file processing across workers
+  - `processor.py` - Individual DAG file parsing
+  - `bundles/` - DAG bundle support (packaging multiple DAGs)
+
+**Data Models (SQLAlchemy ORM):**
+- **`models/`** - Core database models (~40 files)
+  - `dag.py` - DAG metadata and database model
+  - `dagrun.py` - DAG execution runs and state
+  - `taskinstance.py` - Task execution state and metadata (**critical file**)
+  - `connection.py` - External system credentials
+  - `variable.py` - User-defined variables
+  - `xcom.py` - Cross-communication between tasks
+  - `asset.py` - Data asset tracking (datasets)
+  - `trigger.py` - Deferrable operator triggers
+  - `pool.py` - Resource pools for concurrency control
+
+**API & UI:**
+- **`api_fastapi/`** - Modern FastAPI-based REST APIs
+  - `execution_api/` - Task execution API for workers
+  - `core_api/` - Main REST API for UI and external clients
+- **`ui/`** - React-based frontend (TypeScript/Vite)
+- **`api/`** - Legacy API (being phased out)
+
+**Other Core Components:**
+- **`serialization/`** - DAG/task serialization for database storage (critical for scheduler performance)
+- **`cli/`** - Command-line interface
+- **`hooks/`** - Base classes for external system connections
+- **`operators/`**, **`sensors/`**, **`triggers/`** - Base operator/sensor/trigger classes
+- **`security/`** - Authentication and authorization
+- **`observability/`** - Metrics and tracing (OpenTelemetry)
+- **`migrations/`** - Database schema migrations (Alembic)
+
+### Task SDK Architecture
+
+Located in `/task-sdk/src/airflow/sdk/`:
+
+**Design Philosophy:** Lightweight, minimal dependencies, can be installed in task execution environments without full Airflow.
+
+**Key Components:**
+- **`definitions/`** - User-facing APIs for DAG authoring
+  - `dag.py` - DAG class definition
+  - `decorators/` - Task decorators (@task, @dag)
+  - `asset/` - Asset/Dataset definitions
+  - `timetables/` - Scheduling timetables
+- **`execution_time/`** - Task execution runtime
+  - Runtime context for executing tasks
+  - Secret management during execution
+- **`api/`** - Communication with airflow-core
+  - `datamodels/` - Pydantic models for API contracts
+- **`observability/`** - Metrics and tracing for tasks
+
+**Integration:** Task SDK depends on airflow-core for types/interfaces. Core imports SDK classes (DAG, BaseOperator) for backward compatibility. Users write `from airflow.sdk import DAG`.
+
+### Provider System
+
+**Structure:** Each provider in `/providers/<provider_name>/` follows a standard layout:
+```
+providers/amazon/
+├── pyproject.toml          # Package metadata
+├── provider.yaml           # Airflow-specific metadata (integrations, versions)
+├── src/airflow/providers/amazon/aws/
+│   ├── hooks/              # Connection classes
+│   ├── operators/          # Task operators
+│   ├── sensors/            # Sensor operators
+│   ├── transfers/          # Data transfer operators
+│   ├── triggers/           # Async triggers for deferrable operators
+│   ├── executors/          # Custom executors (optional)
+│   ├── auth_manager/       # Authentication plugins (optional)
+│   └── secrets/            # Secret backend implementations (optional)
+└── tests/
+```
+
+**Discovery:** Providers use namespace packages (`airflow.providers.*`) and are discovered dynamically at runtime via entry points in `pyproject.toml` and metadata in `provider.yaml`.
+
+**Common Providers:**
+- `common/sql/` - Base SQL functionality (inherited by postgres, mysql, etc.)
+- `common/io/` - Object storage utilities
+- `common/compat/` - Compatibility helpers
+
+## Key Architectural Patterns
+
+### Data Flow
+```
+User writes DAG (Task SDK)
+         ↓
+DAG Processor parses files (Core)
+         ↓
+Serialized to Database (Core)
+         ↓
+Scheduler creates DagRuns (Core)
+         ↓
+Executor queues TaskInstances (Core)
+         ↓
+Workers execute tasks (Task SDK Runtime)
+         ↓
+Results written to XCom/DB (Core)
+```
+
+### Serialization Strategy
+- DAGs are serialized to the database for scheduler performance
+- Avoids re-parsing Python files on every scheduler loop
+- Version tracking for DAG changes
+- **Critical files:** `/airflow-core/src/airflow/serialization/`
+
+### Async Execution
+- **Triggers** - Long-running async operations (waiting for external events)
+- **Deferrable operators** - Free up worker slots during waits
+- **Triggerer process** - Separate async event loop
+- Allows efficient handling of long-polling operations (e.g., waiting for AWS job completion)
+
+### Separation of Concerns
+- **Authoring (SDK)** vs **Orchestration (Core)** - Clean boundary
+- **Shared libraries** - Symlinked code avoids version conflicts
+- **Provider plugins** - Extensible without modifying core
+
+## Testing
+
+### Test Organization
+
+Tests are co-located with the package they test:
+- `/airflow-core/tests/` - Core Airflow tests
+- `/task-sdk/tests/` - Task SDK tests
+- `/providers/<provider>/tests/` - Provider-specific tests
+
+### Running Tests
+
+**With Breeze (Recommended):**
+```bash
+# Run all core tests
+breeze testing core-tests
+
+# Run specific test file/directory
+breeze testing core-tests tests/models/test_dag.py
+breeze testing core-tests tests/models/
+
+# Run with specific test type
+breeze testing core-tests --test-type CLI
+
+# Run provider tests
+breeze testing providers-tests providers/amazon/
+
+# Run task SDK tests
+breeze testing task-sdk-tests
+
+# Run with different backends
+breeze testing core-tests --backend postgres
+breeze testing core-tests --backend mysql
+
+# Run with coverage
+breeze testing core-tests --enable-coverage
+
+# Collect tests without running
+breeze testing core-tests --collect-only
+```
+
+**Without Breeze:**
+```bash
+# Set PYTHONPATH correctly
+export PYTHONPATH=/path/to/airflow/airflow-core/src:$PYTHONPATH
+
+# Run pytest directly
+pytest airflow-core/tests/models/test_dag.py
+pytest airflow-core/tests/ -k "test_task_states"
+pytest airflow-core/tests/ -m "not db_test"  # Skip database tests
+```
+
+### Test Types
+
+- **Unit tests** - No external dependencies, can run in local virtualenv
+- **Integration tests** - Require external services (Postgres, MySQL, Redis, etc.)
+- **System tests** - End-to-end tests with external systems (AWS, GCP, etc.)
+- **Docker Compose tests** - Quick-start docker-compose verification
+- **Kubernetes tests** - K8s deployment and KubernetesPodOperator tests
+- **Helm tests** - Helm chart rendering verification
+
+## Common Development Tasks
+
+### Working with Models
+
+When modifying database models in `/airflow-core/src/airflow/models/`:
+1. Make changes to the SQLAlchemy model
+2. Generate Alembic migration: `breeze shell` → `airflow db migrate`
+3. Test migration: `breeze testing core-tests --db-reset tests/migrations/`
+
+### Working with Providers
+
+When modifying providers in `/providers/`:
+1. Each provider has independent `pyproject.toml` and `provider.yaml`
+2. Update `provider.yaml` when adding new operators/hooks/sensors
+3. Run provider-specific tests: `breeze testing providers-tests providers/<name>/`
+4. Providers are independently released from core
+
+### Working with Task SDK
+
+When modifying task SDK in `/task-sdk/`:
+1. SDK should remain lightweight with minimal dependencies
+2. Changes may affect DAG authoring API - check backward compatibility
+3. Run SDK tests: `breeze testing task-sdk-tests`
+4. SDK depends on airflow-core but provides cleaner separation
+
+### Code Style & Linting
+
+Pre-commit hooks handle most formatting:
+```bash
+# Install pre-commit hooks
+pre-commit install
+
+# Run manually on all files
+pre-commit run --all-files
+
+# Run specific hook
+pre-commit run ruff --all-files
+```
+
+## Important Files to Understand
+
+**Scheduler & Execution:**
+- `/airflow-core/src/airflow/jobs/scheduler_job_runner.py` - Main scheduler loop (critical)
+- `/airflow-core/src/airflow/models/taskinstance.py` - Task execution state (critical)
+- `/airflow-core/src/airflow/models/dagrun.py` - DAG run state
+- `/airflow-core/src/airflow/executors/base_executor.py` - Executor abstraction
+
+**DAG Processing:**
+- `/airflow-core/src/airflow/dag_processing/manager.py` - DAG parsing orchestration
+- `/airflow-core/src/airflow/serialization/` - DAG serialization (critical for scheduler)
+
+**Task SDK:**
+- `/task-sdk/src/airflow/sdk/definitions/dag.py` - User-facing DAG class
+- `/task-sdk/src/airflow/sdk/execution_time/` - Task execution runtime
+
+**Provider Example:**
+- `/providers/amazon/provider.yaml` - Provider metadata example
+- `/providers/common/sql/` - Base SQL provider used by others
+
+## Project-Specific Conventions
+
+### Import Patterns
+
+- Task SDK components: `from airflow.sdk import DAG`
+- Core components: `from airflow.models import TaskInstance`
+- Shared libraries: `from airflow._shared.timezones import timezone`
+- Provider components: `from airflow.providers.amazon.aws.hooks.s3 import S3Hook`
+
+### Configuration
+
+- Main config: `/airflow-core/src/airflow/configuration.py`
+- Config templates: `/airflow-core/src/airflow/config_templates/`
+- Shared config: `/shared/config/` (symlinked to `airflow-core/src/airflow/_shared/config/`)
+
+### Observability
+
+- OpenTelemetry integration in `/airflow-core/src/airflow/observability/`
+- Metrics and tracing available throughout core and SDK
+- Logging configuration in `/airflow-core/src/airflow/logging_config.py`
+
+## Git Workflow
+
+- **Main branch:** `main` (use for PRs)
+- **Release branches:** `v3-1-test`, `v2-11-test`, etc.
+- Pre-commit hooks run automatically on commit
+- CI runs comprehensive test suite on PRs
+- Follow conventional commit messages when possible
+
+## Documentation
+
+- Contributing guide: `/contributing-docs/`
+- Breeze documentation: `/dev/breeze/doc/`
+- Testing guide: `/contributing-docs/09_testing.rst`
+- Quick start: `/contributing-docs/03_contributors_quick_start.rst`
+
+## Tips
+
+1. **Breeze is your friend** - Use it for consistent environment and running integration tests
+2. **PYTHONPATH matters** - When running tests locally, ensure `airflow-core/src` is in PYTHONPATH
+3. **Serialization is critical** - Changes to models often require updates to serialization logic
+4. **Providers are independent** - Each provider has its own release cycle
+5. **Test types matter** - Use `--test-type` to run specific test categories
+6. **Database backends** - Test with postgres/mysql for production-relevant scenarios
+7. **Symlinks are intentional** - `_shared/` directories are symlinked to `/shared/` to avoid version conflicts
