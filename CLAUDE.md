@@ -358,6 +358,76 @@ breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_time_provider.
 - Use `cd /opt/airflow &&` prefix for DagRun tests to ensure correct working directory
 - If temporal_airflow is not installed, rebuild Breeze image: `breeze build-image --python 3.10 --force-build`
 
+### Breeze Image Caching and New Files
+
+**Problem**: New files created in `temporal_airflow/` (or other directories) may not be visible in Breeze container even after restart.
+
+**Why This Happens**:
+- Breeze Docker images cache directory contents when built
+- The `temporal_airflow/` directory is copied into the image at build time
+- Even though `local-all-sources.yml` mounts `../../../:/opt/airflow:cached`, some directories in the image can override the mount
+- New files created after image build aren't visible until image is rebuilt
+
+**How to Detect**:
+```bash
+# Check if new files are visible in container
+breeze shell --python 3.10 -c "ls -la /opt/airflow/temporal_airflow/"
+
+# If your new file (e.g., workflows.py) is missing, the image needs rebuild
+```
+
+**Solutions**:
+
+1. **Trigger Image Rebuild** (Automatic):
+   - Commit your changes to git: `git add temporal_airflow/ && git commit -m "..."`
+   - Breeze detects file changes and rebuilds automatically on next run
+   - Image rebuild happens in CI/CD automatically
+
+2. **Manual Rebuild** (If needed):
+   ```bash
+   # Currently not needed - committing triggers auto-rebuild
+   # Breeze detects git changes and rebuilds image
+   ```
+
+3. **Test Outside Breeze** (Temporary workaround):
+   ```bash
+   # Install temporal_airflow locally
+   pip install -e temporal_airflow/
+
+   # Run tests directly with pytest
+   pytest temporal_airflow/tests/test_workflows.py -v
+   ```
+
+4. **Wait for CI** (Recommended for new directories):
+   - Commit files to git
+   - Push to PR
+   - CI builds fresh image with all files
+   - Use CI for validation
+
+**Best Practice**:
+- ✅ **Commit new files early** - Triggers image rebuild on next Breeze start
+- ✅ **Test outside Breeze initially** - Faster iteration for new code
+- ✅ **Verify in Breeze after commit** - Ensures integration works correctly
+- ❌ **Don't rely on manual rebuild** - Git commit triggers automatic rebuild
+
+**Example Workflow**:
+```bash
+# 1. Create new files
+echo "new code" > temporal_airflow/workflows.py
+
+# 2. Test locally first (fast iteration)
+pip install -e temporal_airflow/
+pytest temporal_airflow/tests/test_workflows.py -v
+
+# 3. Commit when tests pass
+git add temporal_airflow/workflows.py
+git commit -m "feat: add workflows"
+
+# 4. Now Breeze will rebuild and pick up new files
+breeze down  # Clean up old containers
+breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_workflows.py -v"
+```
+
 **Documentation:**
 - Implementation plan: `/docs/temporal/TEMPORAL_IMPLEMENTATION_PLAN.md`
 - Testing guide: `/docs/temporal/TESTING_PROCEDURE.md`
