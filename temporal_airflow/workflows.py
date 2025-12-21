@@ -7,6 +7,9 @@ from typing import Any
 
 from temporalio import workflow
 
+from airflow.models.dagrun import DagRun, DagRunState
+from airflow.serialization.serialized_objects import SerializedDAG
+from temporal_airflow.time_provider import set_workflow_time
 from temporal_airflow.models import (
     DagExecutionInput,
     DagExecutionResult,
@@ -67,7 +70,16 @@ class ExecuteAirflowDagWorkflow:
 
             workflow.logger.info(f"Deserialized DAG: {self.dag.dag_id}")
 
-            # TODO Commit 3: Create DAG run
+            # Commit 3: Create DAG run
+            dag_run_id = self._create_dag_run(
+                dag_id=input.dag_id,
+                run_id=input.run_id,
+                logical_date=input.logical_date,
+                conf=input.conf,
+            )
+
+            workflow.logger.info(f"Created DAG run: {dag_run_id}")
+
             # TODO Commit 4-7: Scheduling loop
 
             # Placeholder return
@@ -122,3 +134,46 @@ class ExecuteAirflowDagWorkflow:
         Base.metadata.create_all(self.engine)
 
         workflow.logger.info(f"Database initialized for workflow {workflow_id}")
+
+    def _create_dag_run(
+        self,
+        dag_id: str,
+        run_id: str,
+        logical_date: datetime,
+        conf: dict | None,
+    ) -> int:
+        """
+        Create DagRun and TaskInstances.
+
+        Design Note (Decision 1):
+        - Uses workflow-specific SessionFactory
+        - Never uses global create_session()
+        """
+        set_workflow_time(workflow.now())
+
+        # Use workflow-specific session (Decision 1)
+        session = self.SessionFactory()
+        try:
+            # Create DagRun
+            dag_run = DagRun(
+                dag_id=dag_id,
+                run_id=run_id,
+                logical_date=logical_date,
+                run_type="manual",
+                state=DagRunState.RUNNING,
+                conf=conf,
+            )
+            dag_run.dag = self.dag  # Set DAG reference (required for update_state)
+
+            session.add(dag_run)
+            session.flush()
+
+            # Create TaskInstances
+            dag_run.verify_integrity(session=session)
+
+            session.commit()
+
+            workflow.logger.info(f"Created DagRun: {dag_run.id} with {len(dag_run.task_instances)} tasks")
+            return dag_run.id
+        finally:
+            session.close()
