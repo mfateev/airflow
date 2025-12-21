@@ -80,16 +80,19 @@ class ExecuteAirflowDagWorkflow:
 
             workflow.logger.info(f"Created DAG run: {dag_run_id}")
 
-            # TODO Commit 4-7: Scheduling loop
+            # Commit 4-7: Main scheduling loop
+            final_state = await self._scheduling_loop(dag_run_id)
 
-            # Placeholder return
+            end_time = workflow.now()
+
+            # Return result
             return DagExecutionResult(
-                state="success",
+                state=final_state,
                 dag_id=input.dag_id,
                 run_id=input.run_id,
                 start_date=start_time,
-                end_date=workflow.now(),
-                tasks_succeeded=0,
+                end_date=end_time,
+                tasks_succeeded=0,  # TODO: Track in later commits
                 tasks_failed=0,
             )
 
@@ -177,3 +180,47 @@ class ExecuteAirflowDagWorkflow:
             return dag_run.id
         finally:
             session.close()
+
+    async def _scheduling_loop(self, dag_run_id: int) -> str:
+        """
+        Main scheduling loop.
+
+        Design Notes:
+        - Decision 2: Direct activity management (no executor)
+        - Decision 6: Accepts sync calls (ORM queries, update_state)
+
+        Returns:
+            Final DAG run state
+        """
+        # Track running activities: ti_key -> ActivityHandle
+        running_activities: dict[tuple, Any] = {}
+
+        max_iterations = 10000  # Safety limit
+
+        for iteration in range(max_iterations):
+            # Update workflow time (deterministic)
+            set_workflow_time(workflow.now())
+
+            # Decision 6: Sync calls acceptable (fast, in-memory DB)
+            session = self.SessionFactory()
+            try:
+                dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
+                dag_run.dag = self.dag  # Restore DAG reference
+
+                # Check if complete
+                if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
+                    workflow.logger.info(f"DAG completed: {dag_run.state}")
+                    return dag_run.state.value
+
+                # TODO Commit 5: Update state and get schedulable tasks
+                # TODO Commit 6: Start activities for schedulable tasks
+                # TODO Commit 7: Handle activity completions
+
+            finally:
+                session.close()
+
+            # No running activities yet, just sleep
+            await asyncio.sleep(5)
+
+        workflow.logger.error("Max iterations reached!")
+        return "failed"

@@ -163,3 +163,42 @@ async def test_dag_run_creation():
 
             # Should complete (placeholder return for now)
             assert result.dag_id == "test_dag"
+
+
+@pytest.mark.asyncio
+async def test_scheduling_loop_structure():
+    """Test that loop structure works (completion in Commit 5)."""
+    from airflow import DAG
+    from airflow.operators.empty import EmptyOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+
+    # Create simple DAG
+    with DAG(dag_id="test_dag", start_date=datetime(2025, 1, 1)) as dag:
+        EmptyOperator(task_id="task1")
+
+    serialized = SerializedDAG.to_dict(dag)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        input_data = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag=serialized,
+        )
+
+        async with Worker(
+            env.client,
+            task_queue="test-queue",
+            workflows=[ExecuteAirflowDagWorkflow],
+            activities=[],
+        ):
+            result = await env.client.execute_workflow(
+                ExecuteAirflowDagWorkflow.run,
+                input_data,
+                id="test-loop-structure",
+                task_queue="test-queue",
+            )
+
+            # Loop should complete (state will be updated in Commit 5)
+            assert result.state in ["success", "failed"]
+            assert result.dag_id == "test_dag"
