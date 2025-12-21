@@ -212,8 +212,22 @@ class ExecuteAirflowDagWorkflow:
                     workflow.logger.info(f"DAG completed: {dag_run.state}")
                     return dag_run.state.value
 
-                # TODO Commit 5: Update state and get schedulable tasks
-                # TODO Commit 6: Start activities for schedulable tasks
+                # Commit 5: Update state and get schedulable tasks
+                schedulable_tis, callback = dag_run.update_state(
+                    session=session,
+                    execute_callbacks=False,  # We handle callbacks in Phase 5
+                )
+
+                # Start activities for new schedulable tasks
+                if schedulable_tis:
+                    dag_run.schedule_tis(schedulable_tis, session=session)
+                    session.commit()
+
+                    for ti in schedulable_tis:
+                        ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
+                        workflow.logger.info(f"Task ready for scheduling: {ti_key}")
+                        # TODO Commit 6: Serialize task and start activity
+
                 # TODO Commit 7: Handle activity completions
 
             finally:
