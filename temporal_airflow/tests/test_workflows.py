@@ -202,3 +202,44 @@ async def test_scheduling_loop_structure():
             # Loop should complete (state will be updated in Commit 5)
             assert result.state in ["success", "failed"]
             assert result.dag_id == "test_dag"
+
+
+@pytest.mark.asyncio
+async def test_activity_starting():
+    """Test that workflow starts activities for schedulable tasks."""
+    from airflow import DAG
+    from airflow.operators.python import PythonOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
+
+    # Create DAG with Python task
+    with DAG(dag_id="test_dag", start_date=datetime(2025, 1, 1)) as dag:
+        PythonOperator(task_id="task1", python_callable=lambda: "result1")
+
+    serialized = SerializedDAG.to_dict(dag)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        input_data = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag=serialized,
+        )
+
+        # Register activity
+        async with Worker(
+            env.client,
+            task_queue="test-queue",
+            workflows=[ExecuteAirflowDagWorkflow],
+            activities=[run_airflow_task],
+        ):
+            result = await env.client.execute_workflow(
+                ExecuteAirflowDagWorkflow.run,
+                input_data,
+                id="test-activity-start",
+                task_queue="test-queue",
+            )
+
+            # Should complete (even without handling completions yet)
+            # Activities will run but workflow won't process results yet
+            assert result.dag_id == "test_dag"

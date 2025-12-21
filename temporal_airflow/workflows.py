@@ -6,9 +6,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 from airflow.models.dagrun import DagRun, DagRunState
-from airflow.serialization.serialized_objects import SerializedDAG
+from airflow.models.taskinstance import TaskInstance
+from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
 from temporal_airflow.time_provider import set_workflow_time
 from temporal_airflow.models import (
     DagExecutionInput,
@@ -181,6 +183,25 @@ class ExecuteAirflowDagWorkflow:
         finally:
             session.close()
 
+    def _get_upstream_xcom(self, ti: TaskInstance, task) -> dict[str, Any] | None:
+        """
+        Gather XCom values from upstream tasks.
+
+        Design Note (Decision 7):
+        - XCom stored in workflow state (self.xcom_store)
+        - Passed to activities via upstream_results
+        """
+        if not task.upstream_task_ids:
+            return None
+
+        upstream_results = {}
+        for upstream_task_id in task.upstream_task_ids:
+            upstream_key = (ti.dag_id, upstream_task_id, ti.run_id, ti.map_index)
+            if upstream_key in self.xcom_store:
+                upstream_results[upstream_task_id] = self.xcom_store[upstream_key]
+
+        return upstream_results if upstream_results else None
+
     async def _scheduling_loop(self, dag_run_id: int) -> str:
         """
         Main scheduling loop.
@@ -225,8 +246,43 @@ class ExecuteAirflowDagWorkflow:
 
                     for ti in schedulable_tis:
                         ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
-                        workflow.logger.info(f"Task ready for scheduling: {ti_key}")
-                        # TODO Commit 6: Serialize task and start activity
+
+                        # TODO Phase 5: Check pool availability
+
+                        # Commit 6: Extract and serialize ONLY this task (Decision 7)
+                        task = self.dag.get_task(ti.task_id)
+                        serialized_task = SerializedBaseOperator.serialize_operator(task)
+
+                        # Commit 6: Gather upstream XCom (Decision 7)
+                        upstream_results = self._get_upstream_xcom(ti, task)
+
+                        # Commit 6: Start activity directly (Decision 2)
+                        handle = workflow.start_activity(
+                            "run_airflow_task",
+                            arg=TaskExecutionInput(
+                                dag_id=ti.dag_id,
+                                task_id=ti.task_id,
+                                run_id=ti.run_id,
+                                logical_date=dag_run.logical_date,
+                                try_number=ti.try_number,
+                                map_index=ti.map_index,
+                                serialized_task=serialized_task,  # Just this task!
+                                upstream_results=upstream_results,
+                                queue=ti.queue,  # Decision 9: queue support
+                            ),
+                            task_queue=ti.queue or "airflow-tasks",  # Route to correct queue
+                            start_to_close_timeout=timedelta(hours=2),
+                            heartbeat_timeout=timedelta(minutes=5),
+                            retry_policy=RetryPolicy(
+                                maximum_attempts=ti.max_tries or 1,
+                            ),
+                        )
+
+                        running_activities[ti_key] = handle
+
+                        # TODO Phase 5: Track pool usage
+
+                        workflow.logger.info(f"Started activity for {ti_key}")
 
                 # TODO Commit 7: Handle activity completions
 
