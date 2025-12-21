@@ -5,7 +5,9 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from temporal_airflow.models import TaskExecutionInput
+from airflow.utils.state import TaskInstanceState
+
+from temporal_airflow.models import TaskExecutionInput, TaskExecutionResult
 
 
 class TestTaskExecutionInput:
@@ -77,3 +79,84 @@ class TestTaskExecutionInput:
 
         input = TaskExecutionInput(**data)
         assert input.dag_id == "test_dag"
+
+
+class TestTaskExecutionResult:
+    """Test TaskExecutionResult model validation."""
+
+    def test_valid_result_success(self):
+        """Test valid TaskExecutionResult with SUCCESS state."""
+        result = TaskExecutionResult(
+            dag_id="test",
+            task_id="task1",
+            run_id="run1",
+            try_number=1,
+            state=TaskInstanceState.SUCCESS,
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 1, 0),
+        )
+        assert result.dag_id == "test"
+        assert result.state == TaskInstanceState.SUCCESS
+        assert result.return_value is None  # Default
+        assert result.xcom_data is None  # Default
+        assert result.error_message is None  # Default
+
+    def test_valid_result_failed(self):
+        """Test valid TaskExecutionResult with FAILED state."""
+        result = TaskExecutionResult(
+            dag_id="test",
+            task_id="task1",
+            run_id="run1",
+            try_number=1,
+            state=TaskInstanceState.FAILED,
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 1, 0),
+            error_message="Task failed: ValueError",
+        )
+        assert result.state == TaskInstanceState.FAILED
+        assert result.error_message == "Task failed: ValueError"
+
+    def test_with_xcom_data(self):
+        """Test TaskExecutionResult with XCom data."""
+        result = TaskExecutionResult(
+            dag_id="test",
+            task_id="task1",
+            run_id="run1",
+            try_number=1,
+            state=TaskInstanceState.SUCCESS,
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 1, 0),
+            return_value="task output",
+            xcom_data={"return_value": "task output", "custom_key": "custom_value"},
+        )
+        assert result.return_value == "task output"
+        assert result.xcom_data["custom_key"] == "custom_value"
+
+    def test_native_enum_serialization(self):
+        """Test that native TaskInstanceState enum serializes correctly."""
+        result = TaskExecutionResult(
+            dag_id="test",
+            task_id="task1",
+            run_id="run1",
+            try_number=1,
+            state=TaskInstanceState.SUCCESS,
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 1, 0),
+        )
+
+        # Serialize to dict
+        data = result.model_dump()
+        assert data["state"] == "success"  # Enum value
+
+        # Should be able to recreate from dict
+        result2 = TaskExecutionResult(**data)
+        assert result2.state == TaskInstanceState.SUCCESS
+
+    def test_missing_required_field(self):
+        """Test validation fails when required field missing."""
+        with pytest.raises(ValidationError):
+            TaskExecutionResult(
+                dag_id="test",
+                task_id="task1",
+                # Missing run_id, try_number, state, etc.
+            )

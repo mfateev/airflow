@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from airflow.utils.state import TaskInstanceState
+
 # ============================================================================
 # Activity Models
 # ============================================================================
@@ -39,3 +41,35 @@ class TaskExecutionInput(BaseModel):
 
     # Queue for task routing (Decision 9)
     queue: str | None = Field(default=None, description="Task queue for routing")
+
+
+class TaskExecutionResult(BaseModel):
+    """
+    Result model for task execution activity.
+
+    Decision 4: Uses native TaskInstanceState enum.
+    Pydantic handles serialization automatically.
+    """
+
+    # Task identification (echo back)
+    dag_id: str
+    task_id: str
+    run_id: str
+    try_number: int
+
+    # Execution result (Decision 4: native enum)
+    state: TaskInstanceState = Field(..., description="Final task state")
+
+    # Timing information
+    start_date: datetime = Field(..., description="Task start time")
+    end_date: datetime = Field(..., description="Task end time")
+
+    # Task output (Decision 7: XCom handling)
+    return_value: Any | None = Field(default=None, description="Task return value")
+    xcom_data: dict[str, Any] | None = Field(
+        default=None,
+        description="XCom values pushed by this task",
+    )
+
+    # Error information
+    error_message: str | None = Field(default=None, description="Error message if failed")
