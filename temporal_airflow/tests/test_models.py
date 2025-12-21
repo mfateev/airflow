@@ -7,7 +7,12 @@ from pydantic import ValidationError
 
 from airflow.utils.state import TaskInstanceState
 
-from temporal_airflow.models import TaskExecutionInput, TaskExecutionResult
+from temporal_airflow.models import (
+    DagExecutionInput,
+    DagExecutionResult,
+    TaskExecutionInput,
+    TaskExecutionResult,
+)
 
 
 class TestTaskExecutionInput:
@@ -160,3 +165,118 @@ class TestTaskExecutionResult:
                 task_id="task1",
                 # Missing run_id, try_number, state, etc.
             )
+
+
+class TestDagExecutionInput:
+    """Test DagExecutionInput model validation."""
+
+    def test_valid_input(self):
+        """Test valid DagExecutionInput creation."""
+        input = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="manual__2025-01-01T00:00:00",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag={"tasks": [], "dag_id": "test_dag"},
+        )
+        assert input.dag_id == "test_dag"
+        assert input.run_id == "manual__2025-01-01T00:00:00"
+        assert input.conf is None  # Default
+        assert "tasks" in input.serialized_dag
+
+    def test_with_conf(self):
+        """Test DagExecutionInput with DAG configuration."""
+        input = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag={},
+            conf={"param1": "value1", "param2": 42},
+        )
+        assert input.conf == {"param1": "value1", "param2": 42}
+
+    def test_serialization(self):
+        """Test DagExecutionInput serialization."""
+        input = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1, 12, 0, 0),
+            serialized_dag={"tasks": []},
+        )
+
+        data = input.model_dump()
+        assert data["dag_id"] == "test_dag"
+        assert isinstance(data["logical_date"], datetime)
+
+        # Should deserialize back
+        input2 = DagExecutionInput(**data)
+        assert input2.dag_id == "test_dag"
+
+    def test_missing_required_field(self):
+        """Test validation fails when required field missing."""
+        with pytest.raises(ValidationError):
+            DagExecutionInput(dag_id="test")
+
+
+class TestDagExecutionResult:
+    """Test DagExecutionResult model validation."""
+
+    def test_valid_result(self):
+        """Test valid DagExecutionResult creation."""
+        result = DagExecutionResult(
+            state="success",
+            dag_id="test_dag",
+            run_id="test_run",
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 5, 0),
+            tasks_succeeded=5,
+            tasks_failed=0,
+        )
+        assert result.state == "success"
+        assert result.tasks_succeeded == 5
+        assert result.tasks_failed == 0
+
+    def test_defaults(self):
+        """Test DagExecutionResult default values."""
+        result = DagExecutionResult(
+            state="success",
+            dag_id="test_dag",
+            run_id="test_run",
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 5, 0),
+        )
+        assert result.tasks_succeeded == 0  # Default
+        assert result.tasks_failed == 0  # Default
+
+    def test_failed_dag(self):
+        """Test DagExecutionResult for failed DAG."""
+        result = DagExecutionResult(
+            state="failed",
+            dag_id="test_dag",
+            run_id="test_run",
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 5, 0),
+            tasks_succeeded=3,
+            tasks_failed=2,
+        )
+        assert result.state == "failed"
+        assert result.tasks_succeeded == 3
+        assert result.tasks_failed == 2
+
+    def test_serialization(self):
+        """Test DagExecutionResult serialization."""
+        result = DagExecutionResult(
+            state="success",
+            dag_id="test_dag",
+            run_id="test_run",
+            start_date=datetime(2025, 1, 1, 10, 0, 0),
+            end_date=datetime(2025, 1, 1, 10, 5, 0),
+            tasks_succeeded=5,
+        )
+
+        data = result.model_dump()
+        assert data["state"] == "success"
+        assert data["tasks_succeeded"] == 5
+
+        # Should deserialize back
+        result2 = DagExecutionResult(**data)
+        assert result2.state == "success"

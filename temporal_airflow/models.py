@@ -73,3 +73,59 @@ class TaskExecutionResult(BaseModel):
 
     # Error information
     error_message: str | None = Field(default=None, description="Error message if failed")
+
+
+# ============================================================================
+# Workflow Models
+# ============================================================================
+
+
+class DagExecutionInput(BaseModel):
+    """
+    Input model for DAG execution workflow.
+
+    Decision 3: Full serialized_dag passed to workflow (once),
+    then workflow extracts individual tasks for activities.
+    """
+
+    dag_id: str = Field(..., description="DAG identifier")
+    run_id: str = Field(..., description="DAG run identifier")
+    logical_date: datetime = Field(..., description="Logical execution date")
+    conf: dict[str, Any] | None = Field(default=None, description="DAG run configuration")
+    serialized_dag: dict[str, Any] = Field(..., description="Serialized DAG definition")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "dag_id": "example_dag",
+                "run_id": "manual__2025-01-01T00:00:00",
+                "logical_date": "2025-01-01T00:00:00Z",
+                "conf": {},
+                "serialized_dag": {"tasks": []},
+            }
+        }
+
+
+class DagExecutionResult(BaseModel):
+    """Result model for DAG execution workflow."""
+
+    state: str = Field(..., description="Final DAG run state")
+    dag_id: str
+    run_id: str
+    start_date: datetime
+    end_date: datetime
+    tasks_succeeded: int = Field(default=0, description="Number of successful tasks")
+    tasks_failed: int = Field(default=0, description="Number of failed tasks")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "state": "success",
+                "dag_id": "example_dag",
+                "run_id": "manual__2025-01-01T00:00:00",
+                "start_date": "2025-01-01T00:00:00Z",
+                "end_date": "2025-01-01T00:01:30Z",
+                "tasks_succeeded": 5,
+                "tasks_failed": 0,
+            }
+        }
