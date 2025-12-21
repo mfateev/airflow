@@ -243,3 +243,94 @@ async def test_activity_starting():
             # Should complete (even without handling completions yet)
             # Activities will run but workflow won't process results yet
             assert result.dag_id == "test_dag"
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_dag_execution():
+    """Test complete DAG execution with task completion handling."""
+    from airflow import DAG
+    from airflow.operators.python import PythonOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
+
+    # Create DAG with dependencies
+    with DAG(dag_id="test_dag", start_date=datetime(2025, 1, 1)) as dag:
+        def task1_func():
+            return "output_from_task1"
+
+        def task2_func():
+            return "output_from_task2"
+
+        t1 = PythonOperator(task_id="task1", python_callable=task1_func)
+        t2 = PythonOperator(task_id="task2", python_callable=task2_func)
+        t1 >> t2  # Sequential execution
+
+    serialized = SerializedDAG.to_dict(dag)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        input_data = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag=serialized,
+        )
+
+        async with Worker(
+            env.client,
+            task_queue="test-queue",
+            workflows=[ExecuteAirflowDagWorkflow],
+            activities=[run_airflow_task],
+        ):
+            result = await env.client.execute_workflow(
+                ExecuteAirflowDagWorkflow.run,
+                input_data,
+                id="test-e2e-execution",
+                task_queue="test-queue",
+            )
+
+            # Should complete successfully
+            assert result.state == "success"
+            assert result.dag_id == "test_dag"
+            assert result.tasks_succeeded >= 2  # Both tasks ran
+
+
+@pytest.mark.asyncio
+async def test_parallel_task_execution():
+    """Test that parallel tasks execute concurrently."""
+    from airflow import DAG
+    from airflow.operators.python import PythonOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
+
+    with DAG(dag_id="test_dag", start_date=datetime(2025, 1, 1)) as dag:
+        t1 = PythonOperator(task_id="task1", python_callable=lambda: "a")
+        t2 = PythonOperator(task_id="task2", python_callable=lambda: "b")
+        t3 = PythonOperator(task_id="task3", python_callable=lambda: "c")
+        # All can run in parallel
+        [t1, t2, t3]
+
+    serialized = SerializedDAG.to_dict(dag)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        input_data = DagExecutionInput(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1),
+            serialized_dag=serialized,
+        )
+
+        async with Worker(
+            env.client,
+            task_queue="test-queue",
+            workflows=[ExecuteAirflowDagWorkflow],
+            activities=[run_airflow_task],
+        ):
+            result = await env.client.execute_workflow(
+                ExecuteAirflowDagWorkflow.run,
+                input_data,
+                id="test-parallel-execution",
+                task_queue="test-queue",
+            )
+
+            assert result.state == "success"
+            assert result.tasks_succeeded == 3

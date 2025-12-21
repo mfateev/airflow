@@ -9,7 +9,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from airflow.models.dagrun import DagRun, DagRunState
-from airflow.models.taskinstance import TaskInstance
+from airflow.models.taskinstance import TaskInstance, TaskInstanceState
 from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
 from temporal_airflow.time_provider import set_workflow_time
 from temporal_airflow.models import (
@@ -87,6 +87,19 @@ class ExecuteAirflowDagWorkflow:
 
             end_time = workflow.now()
 
+            # Commit 7: Count task results
+            session = self.SessionFactory()
+            try:
+                task_instances = session.query(TaskInstance).filter(
+                    TaskInstance.dag_id == input.dag_id,
+                    TaskInstance.run_id == input.run_id,
+                ).all()
+
+                tasks_succeeded = sum(1 for ti in task_instances if ti.state == TaskInstanceState.SUCCESS)
+                tasks_failed = sum(1 for ti in task_instances if ti.state == TaskInstanceState.FAILED)
+            finally:
+                session.close()
+
             # Return result
             return DagExecutionResult(
                 state=final_state,
@@ -94,8 +107,8 @@ class ExecuteAirflowDagWorkflow:
                 run_id=input.run_id,
                 start_date=start_time,
                 end_date=end_time,
-                tasks_succeeded=0,  # TODO: Track in later commits
-                tasks_failed=0,
+                tasks_succeeded=tasks_succeeded,
+                tasks_failed=tasks_failed,
             )
 
         finally:
@@ -202,6 +215,39 @@ class ExecuteAirflowDagWorkflow:
 
         return upstream_results if upstream_results else None
 
+    async def _handle_activity_result(self, ti_key: tuple, result: TaskExecutionResult):
+        """
+        Update TaskInstance based on activity result.
+
+        Design Note (Decision 4):
+        - result.state is already TaskInstanceState enum
+        - Direct assignment works (no conversion needed)
+        """
+        set_workflow_time(workflow.now())
+
+        session = self.SessionFactory()
+        try:
+            ti = session.query(TaskInstance).filter(
+                TaskInstance.dag_id == ti_key[0],
+                TaskInstance.task_id == ti_key[1],
+                TaskInstance.run_id == ti_key[2],
+                TaskInstance.map_index == ti_key[3],
+            ).one()
+
+            # Decision 4: Direct enum assignment (Pydantic handled serialization)
+            ti.state = result.state
+            ti.start_date = result.start_date
+            ti.end_date = result.end_date
+
+            session.commit()
+
+            workflow.logger.info(
+                f"Updated task {ti_key} to state {ti.state} "
+                f"(duration: {result.end_date - result.start_date})"
+            )
+        finally:
+            session.close()
+
     async def _scheduling_loop(self, dag_run_id: int) -> str:
         """
         Main scheduling loop.
@@ -284,13 +330,41 @@ class ExecuteAirflowDagWorkflow:
 
                         workflow.logger.info(f"Started activity for {ti_key}")
 
-                # TODO Commit 7: Handle activity completions
-
             finally:
                 session.close()
 
-            # No running activities yet, just sleep
-            await asyncio.sleep(5)
+            # Commit 7: Wait for any activities to complete
+            if running_activities:
+                # Decision 2: Use asyncio.wait directly (no executor polling)
+                done, pending = await asyncio.wait(
+                    running_activities.values(),
+                    timeout=5,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Update DB for completed tasks
+                for completed in done:
+                    # Map completed handle back to ti_key
+                    ti_key = next(k for k, v in running_activities.items() if v == completed)
+
+                    try:
+                        result: TaskExecutionResult = completed.result()
+
+                        # Decision 7: Store XCom in workflow state
+                        if result.xcom_data:
+                            self.xcom_store[ti_key] = result.xcom_data
+
+                        await self._handle_activity_result(ti_key, result)
+
+                        # TODO Phase 5: Release pool slot
+
+                    except Exception as e:
+                        workflow.logger.error(f"Activity failed: {e}")
+
+                    del running_activities[ti_key]
+            else:
+                # No running activities, sleep before checking for new work
+                await asyncio.sleep(5)
 
         workflow.logger.error("Max iterations reached!")
         return "failed"
