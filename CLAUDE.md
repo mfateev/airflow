@@ -266,11 +266,11 @@ Tests are co-located with the package they test:
 
 ### Running Tests
 
-**IMPORTANT: Always Use Breeze for Testing**
+**CRITICAL: ALWAYS Use Breeze for Testing**
 
-All tests MUST be run using Breeze to ensure consistent environment and dependencies. Do NOT run tests locally with `pytest` directly unless explicitly working outside the standard test workflow.
+All tests MUST be run using Breeze. Local testing with `pytest` is NOT supported as it requires manual dependency installation and lacks the proper environment. Breeze provides the only supported testing environment.
 
-**With Breeze (Required):**
+**Testing with Breeze:**
 ```bash
 # Run all core tests
 breeze testing core-tests
@@ -299,31 +299,16 @@ breeze testing core-tests --enable-coverage
 breeze testing core-tests --collect-only
 ```
 
-**Local Testing (Only for Quick Iteration on New Code):**
+**Local Testing is NOT Supported:**
 
-Testing without Breeze should ONLY be used for rapid iteration when developing new code/tests that aren't yet committed. Once code is working locally, ALWAYS verify in Breeze before considering the work complete.
-
-```bash
-# Only use this workflow when:
-# - You're writing new test files that aren't yet committed
-# - You need fast iteration without Docker overhead
-# - You're doing exploratory work
-
-# Set PYTHONPATH correctly
-export PYTHONPATH=/path/to/airflow/airflow-core/src:$PYTHONPATH
-
-# Run pytest directly
-pytest airflow-core/tests/models/test_dag.py
-
-# IMPORTANT: Always follow up with Breeze testing
-# 1. Commit your changes
-# 2. Run: breeze down && breeze shell -c "pytest <your-test>"
-```
+Do NOT attempt to run tests locally without Breeze. This requires manual dependency installation, environment setup, and lacks integration support. Always use Breeze for all testing.
 
 ### Test Types
 
-- **Unit tests** - No external dependencies, can run in local virtualenv
-- **Integration tests** - Require external services (Postgres, MySQL, Redis, etc.)
+All test types must be run using Breeze:
+
+- **Unit tests** - No external dependencies, run via Breeze
+- **Integration tests** - Require external services (Postgres, MySQL, Redis, etc.), provided by Breeze
 - **System tests** - End-to-end tests with external systems (AWS, GCP, etc.)
 - **Docker Compose tests** - Quick-start docker-compose verification
 - **Kubernetes tests** - K8s deployment and KubernetesPodOperator tests
@@ -392,58 +377,51 @@ breeze shell --python 3.10 -c "ls -la /opt/airflow/temporal_airflow/"
 
 **Solutions**:
 
-1. **Test Outside Breeze First** (Recommended for new files):
-   ```bash
-   # Install temporal_airflow locally
-   pip install -e temporal_airflow/
-
-   # Run tests directly with pytest
-   pytest temporal_airflow/tests/test_workflows.py -v
-   ```
-   - ✅ Fast iteration during development
-   - ✅ No Docker overhead
-   - ✅ See immediate changes
-
-2. **Commit and Wait for Automatic Rebuild** (May or may not trigger):
+1. **Commit Changes First**:
    ```bash
    git add temporal_airflow/ && git commit -m "feat: add new test"
+   ```
+   - New files must be committed to git
+   - Breeze detects changes from committed files
+
+2. **Clean Environment and Test in Breeze**:
+   ```bash
    breeze down  # Clean up old containers
    breeze shell -c "pytest temporal_airflow/tests/"
    ```
    - Note: Breeze may say "Docker image build is not needed" for test files
    - New test files in `temporal_airflow/` often don't trigger auto-rebuild
-   - If files still missing, see option 3
+   - If files still missing after commit, proceed to option 3
 
-3. **Verify in CI** (Most Reliable):
-   - Commit your changes
-   - Push to PR
+3. **Verify in CI** (Most Reliable for New Files):
+   - Push your committed changes to PR
    - CI builds fresh image with all files
-   - CI tests provide final validation
-   - ✅ Guarantees clean environment
+   - CI tests provide definitive validation
+   - ✅ Guarantees clean environment with all committed files
 
 **Best Practice**:
-- ✅ **Test locally first** - Fast iteration for new code
-- ✅ **Commit changes** - Track your work
-- ✅ **Verify in CI** - Final validation in clean environment
-- ⚠️  **Breeze rebuild is unpredictable** - May or may not pick up new test files
-- ❌ **Don't assume Breeze auto-rebuild works** - It's inconsistent for new files
+- ✅ **Commit new files immediately** - Required for Breeze to see them
+- ✅ **Test in Breeze after commit** - Only supported testing method
+- ✅ **Use CI for final validation** - Especially for new files
+- ⚠️  **Breeze rebuild is unpredictable** - May not pick up new test files immediately
+- ❌ **NEVER test locally without Breeze** - Unsupported, requires manual setup
 
 **Example Workflow**:
 ```bash
 # 1. Create new files
 echo "new code" > temporal_airflow/workflows.py
 
-# 2. Test locally first (fast iteration)
-pip install -e temporal_airflow/
-pytest temporal_airflow/tests/test_workflows.py -v
-
-# 3. Commit when tests pass
+# 2. Commit immediately (required for Breeze)
 git add temporal_airflow/workflows.py
 git commit -m "feat: add workflows"
 
-# 4. Now Breeze will rebuild and pick up new files
+# 3. Test in Breeze
 breeze down  # Clean up old containers
 breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_workflows.py -v"
+
+# 4. If file not found in Breeze, push to PR and validate in CI
+git push
+# CI will build fresh image and run all tests
 ```
 
 **Documentation:**
