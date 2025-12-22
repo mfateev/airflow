@@ -41,7 +41,7 @@ class ExecuteAirflowDagWorkflow:
         """Initialize workflow state."""
         # Decision 1: Workflow-specific database state
         self.engine = None
-        self.SessionFactory = None
+        self.sessionFactory = None
 
         # Decision 3 & 7: DAG state management
         self.serialized_dag = None  # Full DAG (from input)
@@ -93,7 +93,7 @@ class ExecuteAirflowDagWorkflow:
             end_time = workflow.now()
 
             # Commit 7: Count task results
-            session = self.SessionFactory()
+            session = self.sessionFactory()
             try:
                 task_instances = session.query(TaskInstance).filter(
                     TaskInstance.dag_id == input.dag_id,
@@ -144,7 +144,7 @@ class ExecuteAirflowDagWorkflow:
         )
 
         # Create workflow-specific session factory
-        self.SessionFactory = sessionmaker(
+        self.sessionFactory = sessionmaker(
             bind=self.engine,
             autoflush=False,
             autocommit=False,
@@ -171,10 +171,8 @@ class ExecuteAirflowDagWorkflow:
         - Uses workflow-specific SessionFactory
         - Never uses global create_session()
         """
-        set_workflow_time(workflow.now())
-
         # Use workflow-specific session (Decision 1)
-        session = self.SessionFactory()
+        session = self.sessionFactory()
         try:
             # Create DagRun
             dag_run = DagRun(
@@ -229,7 +227,7 @@ class ExecuteAirflowDagWorkflow:
         """
         set_workflow_time(workflow.now())
 
-        session = self.SessionFactory()
+        session = self.sessionFactory()
         try:
             ti = session.query(TaskInstance).filter(
                 TaskInstance.dag_id == ti_key[0],
@@ -269,11 +267,8 @@ class ExecuteAirflowDagWorkflow:
         max_iterations = 10000  # Safety limit
 
         for iteration in range(max_iterations):
-            # Update workflow time (deterministic)
-            set_workflow_time(workflow.now())
-
             # Decision 6: Sync calls acceptable (fast, in-memory DB)
-            session = self.SessionFactory()
+            session = self.sessionFactory()
             try:
                 dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
                 dag_run.dag = self.dag  # Restore DAG reference
@@ -323,9 +318,6 @@ class ExecuteAirflowDagWorkflow:
                             task_queue=ti.queue or "airflow-tasks",  # Route to correct queue
                             start_to_close_timeout=timedelta(hours=2),
                             heartbeat_timeout=timedelta(minutes=5),
-                            retry_policy=RetryPolicy(
-                                maximum_attempts=ti.max_tries or 1,
-                            ),
                         )
 
                         running_activities[ti_key] = handle

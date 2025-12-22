@@ -116,6 +116,7 @@ class ExecuteAirflowDagWorkflow:
 **Decision**: **YES - Remove all TemporalExecutor references**
 
 **Corrected Activity Management Pattern**:
+
 ```python
 async def _scheduling_loop(self, dag_run_id: int) -> str:
     # Track running activities: ti_key -> ActivityHandle
@@ -124,7 +125,7 @@ async def _scheduling_loop(self, dag_run_id: int) -> str:
     while True:
         set_workflow_time(workflow.now())
 
-        session = self.SessionFactory()
+        session = self.sessionFactory()
         try:
             dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
 
@@ -571,6 +572,7 @@ query = query.where(DagRun.run_after <= current_time)
 **Decision**: **YES - Document why sync-in-async is appropriate here**
 
 **Implementation**:
+
 ```python
 async def _scheduling_loop(self, dag_run_id: int) -> str:
     """
@@ -590,7 +592,7 @@ async def _scheduling_loop(self, dag_run_id: int) -> str:
         set_workflow_time(workflow.now())
 
         # Sync calls - acceptable here
-        session = self.SessionFactory()
+        session = self.sessionFactory()
         try:
             dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
 
