@@ -299,6 +299,9 @@ class ExecuteAirflowDagWorkflow:
                     execute_callbacks=False,  # We handle callbacks in Phase 5
                 )
 
+                # Commit state changes (including completion state)
+                session.commit()
+
                 # Start activities for new schedulable tasks
                 if schedulable_tis:
                     dag_run.schedule_tis(schedulable_tis, session=session)
