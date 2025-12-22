@@ -5,9 +5,36 @@ from datetime import datetime
 import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from temporal_airflow.workflows import ExecuteAirflowDagWorkflow
 from temporal_airflow.models import DagExecutionInput
+
+
+# Configure sandbox to pass through problematic modules
+# These modules use threading which is normally restricted, but they're only
+# used for logging/observability which doesn't affect workflow determinism
+PASSTHROUGH_MODULES = [
+    "structlog",
+    "rich",
+    "airflow.sdk.observability",
+    "airflow._shared.observability",
+]
+
+
+def create_worker(client, task_queue, workflows, activities):
+    """Create a Worker with custom sandbox configuration."""
+    return Worker(
+        client,
+        task_queue=task_queue,
+        workflows=workflows,
+        activities=activities,
+        workflow_runner=SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules(
+                *PASSTHROUGH_MODULES
+            )
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -23,7 +50,7 @@ async def test_workflow_database_initialization():
         )
 
         # Start workflow
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -60,7 +87,7 @@ async def test_database_isolation():
         )
 
         # Start two workflows concurrently
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -108,7 +135,7 @@ async def test_dag_deserialization():
             serialized_dag=serialized,
         )
 
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -148,7 +175,7 @@ async def test_dag_run_creation():
             serialized_dag=serialized,
         )
 
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -186,7 +213,7 @@ async def test_scheduling_loop_structure():
             serialized_dag=serialized,
         )
 
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -227,7 +254,7 @@ async def test_activity_starting():
         )
 
         # Register activity
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -275,7 +302,7 @@ async def test_end_to_end_dag_execution():
             serialized_dag=serialized,
         )
 
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
@@ -319,7 +346,7 @@ async def test_parallel_task_execution():
             serialized_dag=serialized,
         )
 
-        async with Worker(
+        async with create_worker(
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
