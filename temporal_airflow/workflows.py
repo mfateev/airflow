@@ -9,13 +9,14 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 # Pass through Airflow imports to avoid sandbox reloading issues
-# This prevents configuration initialization and YAML parsing in the sandbox
+# This prevents configuration initialization, YAML parsing, and pendulum metaclass conflicts
 with workflow.unsafe.imports_passed_through():
+    import pendulum  # Must be imported first to avoid metaclass conflicts
     from airflow.models.dagrun import DagRun, DagRunState
     from airflow.models.taskinstance import TaskInstance, TaskInstanceState
     from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
-
-from temporal_airflow.time_provider import set_workflow_time
+    from airflow._shared.timezones import timezone as airflow_timezone
+    from temporal_airflow.time_provider import set_workflow_time, clear_workflow_time
 from temporal_airflow.models import (
     DagExecutionInput,
     DagExecutionResult,
@@ -116,7 +117,6 @@ class ExecuteAirflowDagWorkflow:
             )
 
         finally:
-            from temporal_airflow.time_provider import clear_workflow_time
             clear_workflow_time()
 
     def _initialize_database(self):
