@@ -14,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
     import pendulum  # Must be imported first to avoid metaclass conflicts
     from airflow.models.dagrun import DagRun, DagRunState
     from airflow.models.taskinstance import TaskInstance, TaskInstanceState
+    from airflow.models.trigger import Trigger  # Required for Callback foreign key
     from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
     from airflow._shared.timezones import timezone as airflow_timezone
     from temporal_airflow.time_provider import set_workflow_time, clear_workflow_time
