@@ -13,6 +13,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     import pendulum  # Must be imported first to avoid metaclass conflicts
     from airflow.models.dagrun import DagRun, DagRunState
+    from airflow.models.dag_version import DagVersion
     from airflow.models.taskinstance import TaskInstance, TaskInstanceState
     from airflow.models.trigger import Trigger  # Required for Callback foreign key
     from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
@@ -176,6 +177,14 @@ class ExecuteAirflowDagWorkflow:
         # Use workflow-specific session (Decision 1)
         session = self.sessionFactory()
         try:
+            # Create DagVersion for this execution
+            dag_version = DagVersion(
+                dag_id=dag_id,
+                version_number=1,
+            )
+            session.add(dag_version)
+            session.flush()
+
             # Create DagRun
             dag_run = DagRun(
                 dag_id=dag_id,
@@ -186,12 +195,13 @@ class ExecuteAirflowDagWorkflow:
                 conf=conf,
             )
             dag_run.dag = self.dag  # Set DAG reference (required for update_state)
+            dag_run.created_dag_version = dag_version  # Link to version
 
             session.add(dag_run)
             session.flush()
 
             # Create TaskInstances
-            dag_run.verify_integrity(session=session)
+            dag_run.verify_integrity(session=session, dag_version_id=dag_version.id)
 
             session.commit()
 
