@@ -17,6 +17,11 @@ with workflow.unsafe.imports_passed_through():
     from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
     from airflow._shared.timezones import timezone as airflow_timezone
     from temporal_airflow.time_provider import set_workflow_time, clear_workflow_time
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.orm import sessionmaker
+    from airflow.models import Base
+
 from temporal_airflow.models import (
     DagExecutionInput,
     DagExecutionResult,
@@ -25,7 +30,7 @@ from temporal_airflow.models import (
 )
 
 
-@workflow.defn(name="execute_airflow_dag")
+@workflow.defn(name="execute_airflow_dag", sandboxed=False)
 class ExecuteAirflowDagWorkflow:
     """
     Temporal workflow that executes a single Airflow DAG.
@@ -128,11 +133,6 @@ class ExecuteAirflowDagWorkflow:
         - Never calls global configure_orm()
         - Uses SQLite URI with workflow-specific identifier
         """
-        # Import at runtime to avoid sandbox restrictions
-        from sqlalchemy import create_engine
-        from sqlalchemy.pool import StaticPool
-        from sqlalchemy.orm import sessionmaker
-
         workflow_id = workflow.info().workflow_id
         conn_str = f"sqlite:///file:memdb_{workflow_id}?mode=memory&cache=shared&uri=true"
 
@@ -152,7 +152,6 @@ class ExecuteAirflowDagWorkflow:
         )
 
         # Create schema
-        from airflow.models import Base
         Base.metadata.create_all(self.engine)
 
         workflow.logger.info(f"Database initialized for workflow {workflow_id}")
