@@ -40,13 +40,24 @@ def create_worker(client, task_queue, workflows, activities):
 @pytest.mark.asyncio
 async def test_workflow_database_initialization():
     """Test that workflow initializes its own database."""
+    from airflow import DAG
+    from airflow.operators.empty import EmptyOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+
+    # Create a minimal real DAG
+    with DAG(dag_id="test_dag", start_date=datetime(2025, 1, 1)) as dag:
+        EmptyOperator(task_id="task1")
+
+    # Serialize it properly
+    serialized = SerializedDAG.to_dict(dag)
+
     async with await WorkflowEnvironment.start_time_skipping() as env:
-        # Create minimal input
+        # Create input with properly serialized DAG
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
             logical_date=datetime(2025, 1, 1),
-            serialized_dag={"dag": {"dag_id": "test_dag"}},
+            serialized_dag=serialized,
         )
 
         # Start workflow
