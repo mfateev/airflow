@@ -171,6 +171,8 @@ class ExecuteAirflowDagWorkflow:
         - Uses workflow-specific SessionFactory
         - Never uses global create_session()
         """
+        set_workflow_time(workflow.now())
+
         # Use workflow-specific session (Decision 1)
         session = self.sessionFactory()
         try:
@@ -267,6 +269,9 @@ class ExecuteAirflowDagWorkflow:
         max_iterations = 10000  # Safety limit
 
         for iteration in range(max_iterations):
+            # Update workflow time (deterministic)
+            set_workflow_time(workflow.now())
+
             # Decision 6: Sync calls acceptable (fast, in-memory DB)
             session = self.sessionFactory()
             try:
