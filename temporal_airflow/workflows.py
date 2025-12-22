@@ -8,9 +8,13 @@ from typing import Any
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from airflow.models.dagrun import DagRun, DagRunState
-from airflow.models.taskinstance import TaskInstance, TaskInstanceState
-from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
+# Pass through Airflow imports to avoid sandbox reloading issues
+# This prevents configuration initialization and YAML parsing in the sandbox
+with workflow.unsafe.imports_passed_through():
+    from airflow.models.dagrun import DagRun, DagRunState
+    from airflow.models.taskinstance import TaskInstance, TaskInstanceState
+    from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
+
 from temporal_airflow.time_provider import set_workflow_time
 from temporal_airflow.models import (
     DagExecutionInput,
