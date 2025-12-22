@@ -1,12 +1,12 @@
 """Tests for Temporal workflows."""
 import asyncio
 
-import pendulum
 import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
+from airflow._shared.timezones import timezone
 from temporal_airflow.workflows import ExecuteAirflowDagWorkflow
 from temporal_airflow.models import DagExecutionInput
 
@@ -45,7 +45,7 @@ async def test_workflow_database_initialization():
     from airflow.serialization.serialized_objects import SerializedDAG
 
     # Create a minimal real DAG
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         EmptyOperator(task_id="task1")
 
     # Serialize it properly
@@ -56,7 +56,7 @@ async def test_workflow_database_initialization():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
@@ -86,14 +86,14 @@ async def test_database_isolation():
         input1 = DagExecutionInput(
             dag_id="dag1",
             run_id="run1",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag={"dag": {"dag_id": "dag1"}},
         )
 
         input2 = DagExecutionInput(
             dag_id="dag2",
             run_id="run2",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag={"dag": {"dag_id": "dag2"}},
         )
 
@@ -132,7 +132,7 @@ async def test_dag_deserialization():
     from airflow.serialization.serialized_objects import SerializedDAG
 
     # Create a real DAG
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         PythonOperator(task_id="task1", python_callable=lambda: None)
 
     # Serialize it
@@ -142,7 +142,7 @@ async def test_dag_deserialization():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
@@ -171,7 +171,7 @@ async def test_dag_run_creation():
     from airflow.serialization.serialized_objects import SerializedDAG
 
     # Create DAG with tasks
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         t1 = PythonOperator(task_id="task1", python_callable=lambda: None)
         t2 = PythonOperator(task_id="task2", python_callable=lambda: None)
         t1 >> t2
@@ -182,7 +182,7 @@ async def test_dag_run_creation():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
@@ -211,7 +211,7 @@ async def test_scheduling_loop_structure():
     from airflow.serialization.serialized_objects import SerializedDAG
 
     # Create simple DAG
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         EmptyOperator(task_id="task1")
 
     serialized = SerializedDAG.to_dict(dag)
@@ -220,7 +220,7 @@ async def test_scheduling_loop_structure():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
@@ -251,7 +251,7 @@ async def test_activity_starting():
     from temporal_airflow.activities import run_airflow_task
 
     # Create DAG with Python task
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         PythonOperator(task_id="task1", python_callable=lambda: "result1")
 
     serialized = SerializedDAG.to_dict(dag)
@@ -260,7 +260,7 @@ async def test_activity_starting():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
@@ -292,7 +292,7 @@ async def test_end_to_end_dag_execution():
     from temporal_airflow.activities import run_airflow_task
 
     # Create DAG with dependencies
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         def task1_func():
             return "output_from_task1"
 
@@ -309,7 +309,7 @@ async def test_end_to_end_dag_execution():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
@@ -340,7 +340,7 @@ async def test_parallel_task_execution():
     from airflow.serialization.serialized_objects import SerializedDAG
     from temporal_airflow.activities import run_airflow_task
 
-    with DAG(dag_id="test_dag", start_date=pendulum.datetime(2025, 1, 1)) as dag:
+    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
         t1 = PythonOperator(task_id="task1", python_callable=lambda: "a")
         t2 = PythonOperator(task_id="task2", python_callable=lambda: "b")
         t3 = PythonOperator(task_id="task3", python_callable=lambda: "c")
@@ -353,7 +353,7 @@ async def test_parallel_task_execution():
         input_data = DagExecutionInput(
             dag_id="test_dag",
             run_id="test_run",
-            logical_date=pendulum.datetime(2025, 1, 1),
+            logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
         )
 
