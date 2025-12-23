@@ -82,19 +82,34 @@ async def test_workflow_database_initialization():
 @pytest.mark.asyncio
 async def test_database_isolation():
     """Test that multiple workflows have isolated databases."""
+    from airflow import DAG
+    from airflow.operators.empty import EmptyOperator
+    from airflow.serialization.serialized_objects import SerializedDAG
+
+    # Create two DAGs
+    with DAG(dag_id="dag1", start_date=timezone.datetime(2025, 1, 1)) as dag1:
+        EmptyOperator(task_id="task1")
+
+    with DAG(dag_id="dag2", start_date=timezone.datetime(2025, 1, 1)) as dag2:
+        EmptyOperator(task_id="task1")
+
+    # Serialize them
+    serialized1 = SerializedDAG.to_dict(dag1)
+    serialized2 = SerializedDAG.to_dict(dag2)
+
     async with await WorkflowEnvironment.start_time_skipping() as env:
         input1 = DagExecutionInput(
             dag_id="dag1",
             run_id="run1",
             logical_date=timezone.datetime(2025, 1, 1),
-            serialized_dag={"dag": {"dag_id": "dag1"}},
+            serialized_dag=serialized1,
         )
 
         input2 = DagExecutionInput(
             dag_id="dag2",
             run_id="run2",
             logical_date=timezone.datetime(2025, 1, 1),
-            serialized_dag={"dag": {"dag_id": "dag2"}},
+            serialized_dag=serialized2,
         )
 
         # Start two workflows concurrently
