@@ -30,6 +30,7 @@ from temporal_airflow.models import (
     TaskExecutionInput,
     TaskExecutionResult,
 )
+from temporal_airflow.activities import run_airflow_task
 
 
 @workflow.defn(name="execute_airflow_dag", sandboxed=False)
@@ -275,6 +276,7 @@ class ExecuteAirflowDagWorkflow:
         """
         # Track running activities: ti_key -> ActivityHandle
         running_activities: dict[tuple, Any] = {}
+        final_state: str | None = None
 
         max_iterations = 20  # TODO: Real safety limit.
 
@@ -297,7 +299,9 @@ class ExecuteAirflowDagWorkflow:
                 if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
                     workflow.logger.info(f"DAG completed: {dag_run.state}")
                     # Handle both enum and string (SQLAlchemy may return either)
-                    return dag_run.state.value if hasattr(dag_run.state, 'value') else str(dag_run.state)
+                    final_state = dag_run.state.value if hasattr(dag_run.state, 'value') else str(dag_run.state)
+                    # Break from try block to trigger finally, then return
+                    break
 
                 # Commit 5: Update state and get schedulable tasks
                 schedulable_tis, callback = dag_run.update_state(
@@ -336,7 +340,7 @@ class ExecuteAirflowDagWorkflow:
                         )
 
                         handle = workflow.start_activity(
-                            "run_airflow_task",
+                            run_airflow_task,
                             arg=TaskExecutionInput(
                                 dag_id=ti.dag_id,
                                 task_id=ti.task_id,
@@ -406,6 +410,10 @@ class ExecuteAirflowDagWorkflow:
             else:
                 # No running activities, sleep before checking for new work
                 await asyncio.sleep(5)
+
+        # Check if we broke out of loop due to completion
+        if final_state:
+            return final_state
 
         workflow.logger.error("Max iterations reached!")
         return "failed"

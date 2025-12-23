@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import structlog
 from temporalio import activity
 
+from airflow.sdk.bases.operator import ExecutorSafeguard
 from airflow.serialization.serialized_objects import SerializedBaseOperator
 from airflow.utils.state import TaskInstanceState
 from temporal_airflow.models import TaskExecutionInput, TaskExecutionResult
@@ -26,7 +27,7 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
         f"(run_id={input.run_id}, try={input.try_number})"
     )
 
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
 
     try:
         # Deserialize task by manually reconstructing the operator (Decision 7)
@@ -74,13 +75,15 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
         activity.logger.info(f"Executing {task_type}.execute()")
 
         # Execute task ✨
-        result = task.execute(context=context)
+        # Pass ExecutorSafeguard sentinel to indicate execution from proper task runner
+        sentinel_key = f"{task.__class__.__name__}__sentinel"
+        result = task.execute(context=context, **{sentinel_key: ExecutorSafeguard.sentinel_value})
         activity.logger.info(f"Task executed successfully")
 
         # Capture XCom pushes
         xcom_data = {"return_value": result} if result is not None else None
 
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
 
         activity.logger.info(
             f"Task completed successfully: {input.dag_id}.{input.task_id} "
@@ -100,7 +103,7 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
         )
 
     except Exception as e:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
 
         activity.logger.error(f"Task failed: {input.dag_id}.{input.task_id}", exc_info=e)
 

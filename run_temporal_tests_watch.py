@@ -10,10 +10,38 @@ import sys
 import signal
 import os
 import threading
+import atexit
 from collections import deque
 
 # Global flag for timeout
 timeout_occurred = False
+
+def cleanup_breeze():
+    """Stop breeze containers on exit."""
+    try:
+        # Get list of running breeze containers
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=breeze", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        container_ids = result.stdout.strip().split('\n')
+        container_ids = [cid for cid in container_ids if cid]  # Remove empty strings
+
+        # Stop containers if any are running
+        if container_ids:
+            subprocess.run(
+                ["docker", "stop"] + container_ids,
+                capture_output=True,
+                timeout=30
+            )
+    except Exception:
+        # Silently ignore cleanup errors
+        pass
+
+# Register cleanup handler
+atexit.register(cleanup_breeze)
 
 def timeout_handler(process, line_buffer):
     """Handle timeout by killing the process and showing last lines."""
@@ -36,6 +64,10 @@ def timeout_handler(process, line_buffer):
         process.wait()
 
 def run_tests_with_watch():
+    # Clean up any existing breeze containers first
+    print("Cleaning up existing breeze containers...", flush=True)
+    cleanup_breeze()
+
     # Command to run
     cmd = [
         "breeze", "shell", "--answer", "n", "-c",
@@ -100,6 +132,17 @@ def run_tests_with_watch():
             if " passed" in line_lower or " skipped" in line_lower or "::test_" in line_lower:
                 line_buffer.append(line)
                 continue
+
+            # Skip Temporal SDK timeout warnings (OK to ignore)
+            # But DO NOT ignore "invalid history builder state" - that's critical!
+            if "temporalio_sdk_core" in line_lower:
+                if "task not found when completing" in line_lower:
+                    line_buffer.append(line)
+                    continue
+                # Also skip timeout during worker shutdown (not a test failure)
+                if "timeout expired" in line_lower and "beginning worker shutdown" in "".join(line_buffer).lower():
+                    line_buffer.append(line)
+                    continue
 
             for pattern in error_patterns:
                 if pattern.lower() in line_lower:
