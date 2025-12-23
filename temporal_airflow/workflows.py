@@ -326,12 +326,13 @@ class ExecuteAirflowDagWorkflow:
                         upstream_results = self._get_upstream_xcom(ti, task)
 
                         # Commit 6: Start activity directly (Decision 2)
-                        # Use workflow's task queue if ti.queue not specified
-                        activity_queue = ti.queue or workflow.info().task_queue
+                        # TODO Phase 5: Implement queue routing (Decision 9)
+                        # For now, always use workflow's task queue to ensure worker picks up activities
+                        activity_queue = workflow.info().task_queue
 
                         workflow.logger.info(
                             f"Starting activity for {ti_key} on queue '{activity_queue}' "
-                            f"(ti.queue={ti.queue})"
+                            f"(workflow queue={workflow.info().task_queue}, ti.queue={ti.queue})"
                         )
 
                         handle = workflow.start_activity(
@@ -345,9 +346,9 @@ class ExecuteAirflowDagWorkflow:
                                 map_index=ti.map_index,
                                 serialized_task=serialized_task,  # Just this task!
                                 upstream_results=upstream_results,
-                                queue=ti.queue,  # Decision 9: queue support
+                                queue=ti.queue,  # Preserved for Phase 5 queue routing
                             ),
-                            task_queue=activity_queue,  # Route to correct queue
+                            task_queue=activity_queue,  # Use workflow's queue for now
                             start_to_close_timeout=timedelta(hours=2),
                             heartbeat_timeout=timedelta(minutes=5),
                         )
