@@ -257,7 +257,19 @@ All test types must be run using Breeze:
 
 This repository includes an experimental Temporal integration (`providers/temporal_airflow/`) that integrates Airflow with Temporal workflows. When working on Temporal-related code, use these testing procedures:
 
-**Testing:**
+**Quick Testing (Recommended):**
+Use the test watcher script that stops at the first error/warning for fast debugging:
+```bash
+# Run all temporal_airflow tests with error detection and timeout (60s)
+./run_temporal_tests_watch.py
+
+# The script will:
+# - Stop at first error/warning and show context
+# - Timeout after 60 seconds if tests hang
+# - Show only relevant error details for quick debugging
+```
+
+**Manual Testing:**
 All tests must be run inside the Breeze container to ensure proper environment and dependencies.
 ```bash
 # Verify temporal_airflow installation
@@ -266,7 +278,7 @@ breeze shell -c "python -c 'from temporal_airflow.time_provider import get_curre
 # Verify Airflow integration (no import conflicts)
 breeze shell -c "python -c 'from airflow.models.dagrun import DagRun; print(\"✓ dagrun imports successfully\")'"
 
-# Run all temporal_airflow tests
+# Run all temporal_airflow tests (see all output)
 breeze shell -c "pytest providers/temporal_airflow/tests/ -v -s"
 
 # Run specific temporal test
