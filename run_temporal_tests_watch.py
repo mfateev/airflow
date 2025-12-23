@@ -2,13 +2,38 @@
 """
 Watch temporal tests and stop at first warning/error.
 Shows only the error line and 10 lines before it.
+Timeout after 1 minute.
 """
 
 import subprocess
 import sys
 import signal
 import os
+import threading
 from collections import deque
+
+# Global flag for timeout
+timeout_occurred = False
+
+def timeout_handler(process, line_buffer):
+    """Handle timeout by killing the process and showing last lines."""
+    global timeout_occurred
+    timeout_occurred = True
+    print("\n" + "=" * 80, flush=True)
+    print("TIMEOUT: Test execution exceeded 60 seconds", flush=True)
+    print("=" * 80, flush=True)
+    print("Last 10 lines of output:", flush=True)
+    print("=" * 80, flush=True)
+    for line in line_buffer:
+        print(line, end='', flush=True)
+    print("=" * 80, flush=True)
+
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 def run_tests_with_watch():
     # Command to run
@@ -49,11 +74,20 @@ def run_tests_with_watch():
         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN)
     )
 
+    # Set up timeout timer (60 seconds)
+    timer = threading.Timer(60.0, timeout_handler, args=(process, line_buffer))
+    timer.daemon = True
+    timer.start()
+
     line_count = 0
     try:
         for line in iter(process.stdout.readline, ''):
             if not line:
                 break
+
+            # Check if timeout occurred
+            if timeout_occurred:
+                return 1
 
             line_count += 1
 
@@ -69,6 +103,9 @@ def run_tests_with_watch():
                     break
 
             if found_error:
+                # Cancel the timer
+                timer.cancel()
+
                 # Print the buffered lines (context before error)
                 print("=" * 80, flush=True)
                 print(f"ERROR/WARNING DETECTED (pattern: '{matched_pattern}')", flush=True)
@@ -98,8 +135,15 @@ def run_tests_with_watch():
             # Add line to buffer
             line_buffer.append(line)
 
+        # Cancel the timer if we finished normally
+        timer.cancel()
+
         # Process completed
         return_code = process.wait()
+
+        if timeout_occurred:
+            return 1
+
         print(f"\nProcess completed. Read {line_count} lines total.", flush=True)
 
         if return_code == 0:
@@ -112,6 +156,7 @@ def run_tests_with_watch():
         return return_code
 
     except KeyboardInterrupt:
+        timer.cancel()
         print("\n\nInterrupted by user", flush=True)
         process.terminate()
         try:
@@ -121,6 +166,7 @@ def run_tests_with_watch():
             process.wait()
         return 130
     except Exception as e:
+        timer.cancel()
         print(f"Exception occurred: {e}", flush=True)
         process.terminate()
         return 1
