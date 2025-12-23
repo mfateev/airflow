@@ -29,11 +29,30 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
     start_time = datetime.utcnow()
 
     try:
-        # Deserialize just this task (Decision 7)
-        task = SerializedBaseOperator.deserialize_operator(input.serialized_task)
+        # Deserialize task by manually reconstructing the operator (Decision 7)
+        # SerializedBaseOperator.deserialize_operator() returns a proxy, not the real operator
+        # So we reconstruct it from the serialized dict instead
+
+        task_type = input.serialized_task.get('task_type')
+        task_module = input.serialized_task.get('_task_module')
+        task_id = input.serialized_task.get('task_id')
 
         activity.logger.info(
-            f"Deserialized task: {task.__class__.__name__} (task_type={getattr(task, 'task_type', 'unknown')})"
+            f"Reconstructing operator: {task_type} from {task_module}"
+        )
+
+        # Import the operator class
+        from importlib import import_module
+        module = import_module(task_module)
+        operator_class = getattr(module, task_type)
+
+        # Instantiate the operator with task_id
+        # For initial implementation, we only pass task_id
+        # TODO: Pass other constructor params from serialized_task for complex operators
+        task = operator_class(task_id=task_id)
+
+        activity.logger.info(
+            f"Instantiated operator: {task.__class__.__name__} (has_execute={hasattr(task, 'execute')})"
         )
 
         # Build minimal execution context
@@ -52,22 +71,11 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
             })(),
         }
 
-        activity.logger.info(f"Built execution context for {input.task_id}")
+        activity.logger.info(f"Executing {task_type}.execute()")
 
         # Execute task ✨
-        # SerializedBaseOperator should proxy attribute access to the underlying operator
-        # Even though hasattr(task, 'execute') returns False, calling it should work via __getattr__
-        try:
-            result = task.execute(context=context)
-            activity.logger.info(f"Task executed successfully via execute()")
-        except AttributeError as e:
-            # If execute doesn't work, this is a fundamental limitation
-            # For now, treat as successful for EmptyOperator which does nothing anyway
-            activity.logger.warning(
-                f"Cannot call execute() on {task.__class__.__name__}: {e}. "
-                f"Treating as successful for basic operators."
-            )
-            result = None
+        result = task.execute(context=context)
+        activity.logger.info(f"Task executed successfully")
 
         # Capture XCom pushes
         xcom_data = {"return_value": result} if result is not None else None
