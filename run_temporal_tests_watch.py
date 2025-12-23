@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Watch temporal tests and stop at first warning/error.
-Shows only the error line and 10 lines before it.
+When an error is detected:
+- Shows the name of the failed test
+- Shows the complete test output (up to 100 lines) from test start to error
+- Shows the error line itself
 Timeout after 1 minute.
 """
 
@@ -11,6 +14,7 @@ import signal
 import os
 import threading
 import atexit
+import re
 from collections import deque
 
 # Global flag for timeout
@@ -71,11 +75,15 @@ def run_tests_with_watch():
     # Command to run
     cmd = [
         "breeze", "shell", "--answer", "n", "-c",
-        "pytest /opt/airflow/providers/temporal_airflow/tests/ -v -s"
+        "pytest /opt/airflow/scripts/temporal_airflow/tests/ -v -s"
     ]
 
-    # Buffer to keep last 10 lines
+    # Buffer to keep last 10 lines (for context)
     line_buffer = deque(maxlen=10)
+
+    # Buffer to keep test output (up to 100 lines)
+    test_buffer = deque(maxlen=100)
+    current_test_name = None
 
     # Error patterns to watch for (case-insensitive - all lowercase)
     error_patterns = [
@@ -94,6 +102,7 @@ def run_tests_with_watch():
     # Start the process with unbuffered output
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    print(f"Running {cmd} in a subprocess...", flush=True)
 
     process = subprocess.Popen(
         cmd,
@@ -128,9 +137,30 @@ def run_tests_with_watch():
             matched_pattern = None
             line_lower = line.lower()
 
-            # Skip lines that are pytest test results (contain "PASSED", "SKIPPED", etc.)
-            if " passed" in line_lower or " skipped" in line_lower or "::test_" in line_lower:
+            # Detect test start (e.g., "tests/test_foo.py::test_bar" or "test_foo.py::test_bar PASSED")
+            # This captures the test name before we see if it passes or fails
+            if "::test_" in line and (" passed" in line_lower or " skipped" in line_lower):
+                # Extract test name for PASSED/SKIPPED tests
+                match = re.search(r'([\w/\._-]+\.py::[\w_\[\],\-]+)', line)
+                if match:
+                    current_test_name = match.group(1)
                 line_buffer.append(line)
+                test_buffer.append(line)
+                continue  # Skip error checking for passed/skipped tests
+            elif "::test_" in line and " failed" in line_lower:
+                # Extract test name for FAILED tests but DON'T continue - let error detection happen
+                match = re.search(r'([\w/\._-]+\.py::[\w_\[\],\-]+)', line)
+                if match:
+                    current_test_name = match.group(1)
+                # Don't continue - fall through to error pattern checking below
+            elif "::test_" in line:
+                # Test is starting (line shows test path but no result yet)
+                match = re.search(r'([\w/\._-]+\.py::[\w_\[\],\-]+)', line)
+                if match:
+                    current_test_name = match.group(1)
+                    test_buffer.clear()  # Start fresh for this test
+                line_buffer.append(line)
+                test_buffer.append(line)
                 continue
 
             # Skip Temporal SDK timeout warnings (OK to ignore)
@@ -138,10 +168,12 @@ def run_tests_with_watch():
             if "temporalio_sdk_core" in line_lower:
                 if "task not found when completing" in line_lower:
                     line_buffer.append(line)
+                    test_buffer.append(line)
                     continue
                 # Also skip timeout during worker shutdown (not a test failure)
                 if "timeout expired" in line_lower and "beginning worker shutdown" in "".join(line_buffer).lower():
                     line_buffer.append(line)
+                    test_buffer.append(line)
                     continue
 
             for pattern in error_patterns:
@@ -154,13 +186,23 @@ def run_tests_with_watch():
                 # Cancel the timer
                 timer.cancel()
 
-                # Print the buffered lines (context before error)
-                print("=" * 80, flush=True)
+                # Print test information
+                print("\n" + "=" * 80, flush=True)
                 print(f"ERROR/WARNING DETECTED (pattern: '{matched_pattern}')", flush=True)
-                print("Context (last 10 lines):", flush=True)
                 print("=" * 80, flush=True)
-                for buffered_line in line_buffer:
-                    print(buffered_line, end='', flush=True)
+
+                if current_test_name:
+                    print(f"\nFailed test: {current_test_name}", flush=True)
+                    print("\n" + "=" * 80, flush=True)
+                    print(f"Full test output (up to 100 lines):", flush=True)
+                    print("=" * 80, flush=True)
+                    for test_line in test_buffer:
+                        print(test_line, end='', flush=True)
+                else:
+                    print(f"\nNo test name detected. Context (10 lines preceding the error):", flush=True)
+                    print("=" * 80, flush=True)
+                    for buffered_line in line_buffer:
+                        print(buffered_line, end='', flush=True)
 
                 # Print the error line itself
                 print("\n" + "=" * 80, flush=True)
@@ -180,8 +222,9 @@ def run_tests_with_watch():
 
                 return 1
 
-            # Add line to buffer
+            # Add line to both buffers
             line_buffer.append(line)
+            test_buffer.append(line)
 
         # Cancel the timer if we finished normally
         timer.cancel()

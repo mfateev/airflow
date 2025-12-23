@@ -255,7 +255,7 @@ All test types must be run using Breeze:
 
 ### Testing Temporal Integration
 
-This repository includes an experimental Temporal integration (`providers/temporal_airflow/`) that integrates Airflow with Temporal workflows. When working on Temporal-related code, use these testing procedures:
+This repository includes an experimental Temporal integration (`scripts/temporal_airflow/`) that integrates Airflow with Temporal workflows. When working on Temporal-related code, use these testing procedures:
 
 **Quick Testing (Recommended):**
 Use the test watcher script that stops at the first error/warning for fast debugging:
@@ -279,15 +279,15 @@ breeze shell -c "python -c 'from temporal_airflow.time_provider import get_curre
 breeze shell -c "python -c 'from airflow.models.dagrun import DagRun; print(\"✓ dagrun imports successfully\")'"
 
 # Run all temporal_airflow tests (see all output)
-breeze shell -c "pytest providers/temporal_airflow/tests/ -v -s"
+breeze shell -c "pytest scripts/temporal_airflow/tests/ -v -s"
 
 # Run specific temporal test
-breeze shell -c "pytest providers/temporal_airflow/tests/test_time_provider.py -v -s"
+breeze shell -c "pytest scripts/temporal_airflow/tests/test_time_provider.py -v -s"
 ```
 
 **Test Files:**
-- `providers/temporal_airflow/tests/test_time_provider.py` - Time provider with Temporal context injection (4 tests)
-- `providers/temporal_airflow/tests/test_models.py` - Temporal data models (TaskExecutionInput, etc.)
+- `scripts/temporal_airflow/tests/test_time_provider.py` - Time provider with Temporal context injection (4 tests)
+- `scripts/temporal_airflow/tests/test_models.py` - Temporal data models (TaskExecutionInput, etc.)
 - `airflow-core/tests/unit/models/test_dagrun.py::TestDagRun` - Regression tests (62 tests)
 
 **Expected Results:**
