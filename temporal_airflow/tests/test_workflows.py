@@ -43,6 +43,7 @@ async def test_workflow_database_initialization():
     from airflow import DAG
     from airflow.operators.empty import EmptyOperator
     from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
 
     # Create a minimal real DAG
     with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
@@ -65,7 +66,7 @@ async def test_workflow_database_initialization():
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
-            activities=[],
+            activities=[run_airflow_task],
         ):
             result = await env.client.execute_workflow(
                 ExecuteAirflowDagWorkflow.run,
@@ -85,6 +86,7 @@ async def test_database_isolation():
     from airflow import DAG
     from airflow.operators.empty import EmptyOperator
     from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
 
     # Create two DAGs
     with DAG(dag_id="dag1", start_date=timezone.datetime(2025, 1, 1)) as dag1:
@@ -117,7 +119,7 @@ async def test_database_isolation():
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
-            activities=[],
+            activities=[run_airflow_task],
         ):
             results = await asyncio.gather(
                 env.client.execute_workflow(
@@ -145,6 +147,7 @@ async def test_dag_deserialization():
     from airflow import DAG
     from airflow.operators.python import PythonOperator
     from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
 
     # Create a real DAG
     with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
@@ -165,7 +168,7 @@ async def test_dag_deserialization():
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
-            activities=[],
+            activities=[run_airflow_task],
         ):
             result = await env.client.execute_workflow(
                 ExecuteAirflowDagWorkflow.run,
@@ -184,6 +187,7 @@ async def test_dag_run_creation():
     from airflow import DAG
     from airflow.operators.python import PythonOperator
     from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
 
     # Create DAG with tasks
     with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
@@ -205,7 +209,7 @@ async def test_dag_run_creation():
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
-            activities=[],
+            activities=[run_airflow_task],
         ):
             result = await env.client.execute_workflow(
                 ExecuteAirflowDagWorkflow.run,
@@ -224,6 +228,7 @@ async def test_scheduling_loop_structure():
     from airflow import DAG
     from airflow.operators.empty import EmptyOperator
     from airflow.serialization.serialized_objects import SerializedDAG
+    from temporal_airflow.activities import run_airflow_task
 
     # Create simple DAG
     with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
@@ -243,7 +248,7 @@ async def test_scheduling_loop_structure():
             env.client,
             task_queue="test-queue",
             workflows=[ExecuteAirflowDagWorkflow],
-            activities=[],
+            activities=[run_airflow_task],
         ):
             result = await env.client.execute_workflow(
                 ExecuteAirflowDagWorkflow.run,
