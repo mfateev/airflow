@@ -38,7 +38,7 @@ def timeout_handler(process, line_buffer):
 def run_tests_with_watch():
     # Command to run
     cmd = [
-        "breeze", "shell", "-c",
+        "breeze", "shell", "--answer", "n", "-c",
         "pytest /opt/airflow/providers/temporal_airflow/tests/ -v -s"
     ]
 
@@ -95,6 +95,11 @@ def run_tests_with_watch():
             found_error = False
             matched_pattern = None
             line_lower = line.lower()
+
+            # Skip lines that are pytest test results (contain "PASSED", "SKIPPED", etc.)
+            if " passed" in line_lower or " skipped" in line_lower or "::test_" in line_lower:
+                line_buffer.append(line)
+                continue
 
             for pattern in error_patterns:
                 if pattern.lower() in line_lower:
