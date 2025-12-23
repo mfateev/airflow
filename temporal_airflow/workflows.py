@@ -279,6 +279,11 @@ class ExecuteAirflowDagWorkflow:
         max_iterations = 10000  # Safety limit
 
         for iteration in range(max_iterations):
+            workflow.logger.info(
+                f"Scheduling loop iteration {iteration + 1}: "
+                f"{len(running_activities)} activities running"
+            )
+
             # Update workflow time (deterministic)
             set_workflow_time(workflow.now())
 
@@ -321,6 +326,14 @@ class ExecuteAirflowDagWorkflow:
                         upstream_results = self._get_upstream_xcom(ti, task)
 
                         # Commit 6: Start activity directly (Decision 2)
+                        # Use workflow's task queue if ti.queue not specified
+                        activity_queue = ti.queue or workflow.info().task_queue
+
+                        workflow.logger.info(
+                            f"Starting activity for {ti_key} on queue '{activity_queue}' "
+                            f"(ti.queue={ti.queue})"
+                        )
+
                         handle = workflow.start_activity(
                             "run_airflow_task",
                             arg=TaskExecutionInput(
@@ -334,7 +347,7 @@ class ExecuteAirflowDagWorkflow:
                                 upstream_results=upstream_results,
                                 queue=ti.queue,  # Decision 9: queue support
                             ),
-                            task_queue=ti.queue or "airflow-tasks",  # Route to correct queue
+                            task_queue=activity_queue,  # Route to correct queue
                             start_to_close_timeout=timedelta(hours=2),
                             heartbeat_timeout=timedelta(minutes=5),
                         )
@@ -343,18 +356,26 @@ class ExecuteAirflowDagWorkflow:
 
                         # TODO Phase 5: Track pool usage
 
-                        workflow.logger.info(f"Started activity for {ti_key}")
+                        workflow.logger.info(f"Activity handle created for {ti_key}")
 
             finally:
                 session.close()
 
             # Commit 7: Wait for any activities to complete
             if running_activities:
+                workflow.logger.info(
+                    f"Waiting for {len(running_activities)} activities to complete..."
+                )
+
                 # Decision 2: Use asyncio.wait directly (no executor polling)
                 done, pending = await asyncio.wait(
                     running_activities.values(),
                     timeout=5,
                     return_when=asyncio.FIRST_COMPLETED
+                )
+
+                workflow.logger.info(
+                    f"Activity wait completed: {len(done)} done, {len(pending)} pending"
                 )
 
                 # Update DB for completed tasks
@@ -365,6 +386,10 @@ class ExecuteAirflowDagWorkflow:
                     try:
                         result: TaskExecutionResult = completed.result()
 
+                        workflow.logger.info(
+                            f"Activity completed for {ti_key}: state={result.state}"
+                        )
+
                         # Decision 7: Store XCom in workflow state
                         if result.xcom_data:
                             self.xcom_store[ti_key] = result.xcom_data
@@ -374,7 +399,7 @@ class ExecuteAirflowDagWorkflow:
                         # TODO Phase 5: Release pool slot
 
                     except Exception as e:
-                        workflow.logger.error(f"Activity failed: {e}")
+                        workflow.logger.error(f"Activity failed for {ti_key}: {e}")
 
                     del running_activities[ti_key]
             else:
