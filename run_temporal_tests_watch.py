@@ -45,18 +45,18 @@ def run_tests_with_watch():
     # Buffer to keep last 10 lines
     line_buffer = deque(maxlen=10)
 
-    # Error patterns to watch for (case-insensitive)
+    # Error patterns to watch for (case-insensitive - all lowercase)
     error_patterns = [
-        "FAILED",
-        "ERROR",
-        "[error",  # Matches [error] and [error    ]
-        "Error:",
-        "Exception:",
-        "Traceback",
-        "AssertionError",
-        "[warning",  # Matches [warning] and [warning  ]
-        "[WARN",
-        "Warning:",
+        "failed",
+        "error",
+        "[error",  # Matches [error], [ERROR], [error    ], etc.
+        "error:",
+        "exception:",
+        "traceback",
+        "assertionerror",
+        "[warning",  # Matches [warning], [WARNING], [warning  ], etc.
+        "[warn",
+        "warning:",
     ]
 
     # Start the process with unbuffered output
