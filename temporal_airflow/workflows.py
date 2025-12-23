@@ -291,7 +291,8 @@ class ExecuteAirflowDagWorkflow:
                 # Check if complete
                 if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
                     workflow.logger.info(f"DAG completed: {dag_run.state}")
-                    return dag_run.state.value
+                    # Handle both enum and string (SQLAlchemy may return either)
+                    return dag_run.state.value if hasattr(dag_run.state, 'value') else str(dag_run.state)
 
                 # Commit 5: Update state and get schedulable tasks
                 schedulable_tis, callback = dag_run.update_state(
