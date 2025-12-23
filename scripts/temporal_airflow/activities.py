@@ -35,16 +35,13 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
     start_time = datetime.now(timezone.utc)
 
     try:
-        # Deserialize task by manually reconstructing the operator (Decision 7)
-        # SerializedBaseOperator.deserialize_operator() returns a proxy, not the real operator
-        # So we reconstruct it from the serialized dict instead
-
+        # Deserialize task by reconstructing the operator with all parameters (Decision 7)
         task_type = input.serialized_task.get('task_type')
         task_module = input.serialized_task.get('_task_module')
         task_id = input.serialized_task.get('task_id')
 
         activity.logger.info(
-            f"Reconstructing operator: {task_type} from {task_module}"
+            f"Reconstructing operator: {task_type} from {task_module} (task_id={task_id})"
         )
 
         # Import the operator class
@@ -52,10 +49,30 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
         module = import_module(task_module)
         operator_class = getattr(module, task_type)
 
-        # Instantiate the operator with task_id
-        # For initial implementation, we only pass task_id
-        # TODO: Pass other constructor params from serialized_task for complex operators
-        task = operator_class(task_id=task_id)
+        # Extract constructor parameters from serialized data
+        # Use SerializedBaseOperator's deserialization which handles all the complexity
+        serialized_op = SerializedBaseOperator(input.serialized_task)
+
+        # Get the actual operator by deserializing
+        # The deserialize method returns a dict with operator data
+        try:
+            # Try to get params from the serialized object's internal structure
+            params = serialized_op._task_dict
+
+            # Filter out internal Airflow metadata
+            constructor_kwargs = {
+                k: v for k, v in params.items()
+                if not k.startswith('_') or k == '_python_callable'  # Include _python_callable
+            }
+
+            activity.logger.info(f"Constructor kwargs keys: {list(constructor_kwargs.keys())}")
+
+            # Instantiate the operator with deserialized parameters
+            task = operator_class(**constructor_kwargs)
+        except Exception as e:
+            activity.logger.error(f"Deserialization failed: {e}, falling back to basic instantiation")
+            # Fallback: just use task_id
+            task = operator_class(task_id=task_id)
 
         activity.logger.info(
             f"Instantiated operator: {task.__class__.__name__} (has_execute={hasattr(task, 'execute')})"
