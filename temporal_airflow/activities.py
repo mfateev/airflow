@@ -30,17 +30,23 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
 
     try:
         # Deserialize just this task (Decision 7)
-        task = SerializedBaseOperator.deserialize_operator(input.serialized_task)
+        # In Airflow 3.0, deserialize_operator returns a SerializedBaseOperator wrapper
+        # We need to call .deserialize() on it to get the actual operator
+        serialized_task = SerializedBaseOperator.deserialize_operator(input.serialized_task)
 
         activity.logger.info(
-            f"Deserialized task: {task.__class__.__name__} "
-            f"(type={type(task)}, has_execute={hasattr(task, 'execute')})"
+            f"Got serialized wrapper: {serialized_task.__class__.__name__}"
         )
 
-        # Debug: Check what attributes/methods the task has
-        activity.logger.info(
-            f"Task attributes: {[a for a in dir(task) if not a.startswith('_')][:20]}"
-        )
+        # Unwrap to get actual operator
+        if isinstance(serialized_task, SerializedBaseOperator):
+            task = serialized_task.deserialize()
+            activity.logger.info(
+                f"Deserialized to actual operator: {task.__class__.__name__} "
+                f"(has_execute={hasattr(task, 'execute')})"
+            )
+        else:
+            task = serialized_task
 
         # Build minimal execution context
         context = {
@@ -59,21 +65,6 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
         activity.logger.info(f"Built execution context for {input.task_id}")
 
         # Execute task ✨
-        # Check if we need to unwrap SerializedBaseOperator
-        if isinstance(task, SerializedBaseOperator):
-            activity.logger.info("Task is SerializedBaseOperator, attempting to get actual operator")
-            # Try to get the actual operator - check common patterns
-            if hasattr(task, '_operator'):
-                actual_task = task._operator
-                activity.logger.info(f"Got operator from _operator: {type(actual_task)}")
-            elif hasattr(task, 'operator'):
-                actual_task = task.operator
-                activity.logger.info(f"Got operator from operator: {type(actual_task)}")
-            else:
-                activity.logger.error(f"Cannot unwrap SerializedBaseOperator. Available attrs: {dir(task)}")
-                raise RuntimeError("Cannot extract actual operator from SerializedBaseOperator")
-            task = actual_task
-
         result = task.execute(context=context)
 
         # Capture XCom pushes
