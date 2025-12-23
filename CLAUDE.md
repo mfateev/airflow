@@ -38,8 +38,8 @@ Breeze is the official Docker-based development environment. It provides a consi
 # Enter Breeze shell (interactive development environment)
 breeze shell
 
-# Enter with specific Python version and database
-breeze shell --python 3.11 --backend postgres
+# Enter with specific database backend
+breeze shell --backend postgres
 
 # Run tests
 breeze testing core-tests                    # Run all core tests
@@ -48,7 +48,7 @@ breeze testing providers-tests               # Run provider tests
 breeze testing task-sdk-tests                # Run task SDK tests
 
 # Run tests with specific options
-breeze testing core-tests --backend postgres --python 3.11
+breeze testing core-tests --backend postgres
 breeze testing core-tests --test-type CLI    # Run only CLI tests
 breeze testing core-tests --collect-only     # List tests without running
 
@@ -327,19 +327,19 @@ This repository includes an experimental Temporal integration (`temporal_airflow
 **Manual Testing with Breeze:**
 ```bash
 # Verify temporal_airflow installation
-breeze shell --python 3.10 -c "python -c 'from temporal_airflow.time_provider import get_current_time; print(\"✓ temporal_airflow installed\")'"
+breeze shell -c "python -c 'from temporal_airflow.time_provider import get_current_time; print(\"✓ temporal_airflow installed\")'"
 
 # Verify Airflow integration (no import conflicts)
-breeze shell --python 3.10 -c "python -c 'from airflow.models.dagrun import DagRun; print(\"✓ dagrun imports successfully\")'"
+breeze shell -c "python -c 'from airflow.models.dagrun import DagRun; print(\"✓ dagrun imports successfully\")'"
 
 # Run all temporal_airflow tests
-breeze shell --python 3.10 -c "pytest temporal_airflow/tests/ -v"
+breeze shell -c "pytest temporal_airflow/tests/ -v"
 
 # Run DagRun regression tests (verify no regressions from temporal integration)
-breeze shell --python 3.10 -c "cd /opt/airflow && pytest airflow-core/tests/unit/models/test_dagrun.py::TestDagRun -v --tb=short"
+breeze shell -c "cd /opt/airflow && pytest airflow-core/tests/unit/models/test_dagrun.py::TestDagRun -v --tb=short"
 
 # Run specific temporal test
-breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_time_provider.py -v"
+breeze shell -c "pytest temporal_airflow/tests/test_time_provider.py -v"
 ```
 
 **Test Files:**
@@ -353,9 +353,9 @@ breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_time_provider.
 - ✅ No import conflicts between temporal_airflow and airflow.models
 
 **Important Notes:**
-- Tests must run inside Breeze container using `breeze shell --python 3.10 -c "command"`
+- Tests must run inside Breeze container using `breeze shell -c "command"`
 - Use `cd /opt/airflow &&` prefix for DagRun tests to ensure correct working directory
-- If temporal_airflow is not installed, rebuild Breeze image: `breeze build-image --python 3.10 --force-build`
+- If temporal_airflow is not installed, rebuild Breeze image: `breeze ci-image build`
 
 ### Breeze Image Caching and New Files
 
@@ -370,7 +370,7 @@ breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_time_provider.
 **How to Detect**:
 ```bash
 # Check if new files are visible in container
-breeze shell --python 3.10 -c "ls -la /opt/airflow/temporal_airflow/"
+breeze shell -c "ls -la /opt/airflow/temporal_airflow/"
 
 # If your new file (e.g., workflows.py) is missing, the image needs rebuild
 ```
@@ -417,7 +417,7 @@ git commit -m "feat: add workflows"
 
 # 3. Test in Breeze
 breeze down  # Clean up old containers
-breeze shell --python 3.10 -c "pytest temporal_airflow/tests/test_workflows.py -v"
+breeze shell -c "pytest temporal_airflow/tests/test_workflows.py -v"
 
 # 4. If file not found in Breeze, push to PR and validate in CI
 git push
