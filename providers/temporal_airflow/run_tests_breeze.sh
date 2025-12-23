@@ -7,8 +7,8 @@ set -e
 uv pip install temporalio structlog
 
 # Add to PYTHONPATH
-export PYTHONPATH=/opt/airflow/temporal_airflow:$PYTHONPATH
+export PYTHONPATH=/opt/airflow/providers/temporal_airflow:$PYTHONPATH
 
 # Run tests
 cd /opt/airflow
-pytest temporal_airflow/tests/test_workflows.py "$@"
+pytest providers/temporal_airflow/tests/test_workflows.py "$@"

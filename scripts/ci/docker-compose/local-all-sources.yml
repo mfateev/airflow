@@ -31,7 +31,7 @@ services:
       - ../../../.bash_history:/root/.bash_history:cached
       - ../../../.inputrc:/root/.inputrc:cached
       - ../../../tmp:/tmp:cached
-      - ../../../:/opt/airflow:cached
+      - ../../../:/opt/airflow:consistent
       - root-airflow-volume:/root/airflow/
       - airflow-cache-volume:/root/.cache
 volumes:

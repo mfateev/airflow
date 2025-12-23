@@ -18,7 +18,7 @@ from temporal_airflow.models import (
 class TestTaskExecutionInput:
     """Test TaskExecutionInput model validation."""
 
-    def test_valid_input(self):
+    def test_valid_input_bar(self):
         """Test valid TaskExecutionInput creation."""
         input = TaskExecutionInput(
             dag_id="test_dag",

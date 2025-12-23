@@ -276,7 +276,7 @@ class ExecuteAirflowDagWorkflow:
         # Track running activities: ti_key -> ActivityHandle
         running_activities: dict[tuple, Any] = {}
 
-        max_iterations = 10000  # Safety limit
+        max_iterations = 20  # TODO: Real safety limit.
 
         for iteration in range(max_iterations):
             workflow.logger.info(
