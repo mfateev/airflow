@@ -12,6 +12,23 @@ from airflow.utils.state import TaskInstanceState
 # ============================================================================
 
 
+class TaskExecutionFailureDetails(BaseModel):
+    """
+    Details passed in ApplicationError when task execution fails.
+
+    This provides structured error information that can be parsed
+    by the workflow to update TaskInstance state.
+    """
+
+    dag_id: str = Field(..., description="DAG identifier")
+    task_id: str = Field(..., description="Task identifier")
+    run_id: str = Field(..., description="DAG run identifier")
+    try_number: int = Field(..., description="Retry attempt number")
+    start_date: datetime = Field(..., description="Task start time")
+    end_date: datetime = Field(..., description="Task end time")
+    error_message: str = Field(..., description="Error message from exception")
+
+
 class TaskExecutionInput(BaseModel):
     """
     Input model for task execution activity.

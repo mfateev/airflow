@@ -7,6 +7,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError, ActivityError
 
 # Pass through Airflow imports to avoid sandbox reloading issues
 # This prevents configuration initialization, YAML parsing, and pendulum metaclass conflicts
@@ -29,6 +30,7 @@ from temporal_airflow.models import (
     DagExecutionResult,
     TaskExecutionInput,
     TaskExecutionResult,
+    TaskExecutionFailureDetails,
 )
 from temporal_airflow.activities import run_airflow_task
 
@@ -388,8 +390,11 @@ class ExecuteAirflowDagWorkflow:
                     # Map completed handle back to ti_key
                     ti_key = next(k for k, v in running_activities.items() if v == completed)
 
+                    workflow.logger.info(f"Processing completed activity for {ti_key}")
+
                     try:
                         result: TaskExecutionResult = completed.result()
+                        workflow.logger.info(f"Activity result retrieved for {ti_key}")
 
                         workflow.logger.info(
                             f"Activity completed for {ti_key}: state={result.state}"
@@ -403,8 +408,60 @@ class ExecuteAirflowDagWorkflow:
 
                         # TODO Phase 5: Release pool slot
 
+                    except ActivityError as e:
+                        workflow.logger.error(
+                            f"ActivityError caught for {ti_key}: {e.message}, cause type: {type(e.cause)}"
+                        )
+
+                        # Check if the cause is an ApplicationError
+                        if isinstance(e.cause, ApplicationError):
+                            app_error = e.cause
+
+                            # Parse failure details from ApplicationError
+                            # Details are serialized as dicts by Temporal's converter
+                            if app_error.details and len(app_error.details) > 0:
+                                failure_data = app_error.details[0]
+
+                                # Deserialize dict to Pydantic model
+                                if isinstance(failure_data, dict):
+                                    failure_details = TaskExecutionFailureDetails(**failure_data)
+                                elif isinstance(failure_details, TaskExecutionFailureDetails):
+                                    failure_details = failure_data
+                                else:
+                                    workflow.logger.error(
+                                        f"ApplicationError for {ti_key} has unexpected details type: {type(failure_data)}"
+                                    )
+                                    failure_details = None
+
+                                if failure_details:
+                                    # Create failed result to update TaskInstance
+                                    failed_result = TaskExecutionResult(
+                                        dag_id=failure_details.dag_id,
+                                        task_id=failure_details.task_id,
+                                        run_id=failure_details.run_id,
+                                        try_number=failure_details.try_number,
+                                        state=TaskInstanceState.FAILED,
+                                        start_date=failure_details.start_date,
+                                        end_date=failure_details.end_date,
+                                        error_message=failure_details.error_message,
+                                    )
+
+                                    await self._handle_activity_result(ti_key, failed_result)
+                            else:
+                                workflow.logger.error(
+                                    f"ApplicationError for {ti_key} missing details"
+                                )
+                        else:
+                            workflow.logger.error(
+                                f"Activity failed for {ti_key} with non-ApplicationError cause: {type(e.cause)}"
+                            )
+
+                        # TODO Phase 5: Release pool slot
+
                     except Exception as e:
-                        workflow.logger.error(f"Activity failed for {ti_key}: {e}")
+                        workflow.logger.error(
+                            f"Unexpected error for {ti_key}: {type(e).__name__}: {e}"
+                        )
 
                     del running_activities[ti_key]
             else:

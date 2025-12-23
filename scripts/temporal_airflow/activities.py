@@ -4,11 +4,16 @@ from datetime import datetime, timezone
 
 import structlog
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from airflow.sdk.bases.operator import ExecutorSafeguard
 from airflow.serialization.serialized_objects import SerializedBaseOperator
 from airflow.utils.state import TaskInstanceState
-from temporal_airflow.models import TaskExecutionInput, TaskExecutionResult
+from temporal_airflow.models import (
+    TaskExecutionInput,
+    TaskExecutionResult,
+    TaskExecutionFailureDetails,
+)
 
 logger = structlog.get_logger()
 
@@ -107,13 +112,23 @@ async def run_airflow_task(input: TaskExecutionInput) -> TaskExecutionResult:
 
         activity.logger.error(f"Task failed: {input.dag_id}.{input.task_id}", exc_info=e)
 
-        return TaskExecutionResult(
+        # Create structured failure details using Pydantic model
+        failure_details = TaskExecutionFailureDetails(
             dag_id=input.dag_id,
             task_id=input.task_id,
             run_id=input.run_id,
             try_number=input.try_number,
-            state=TaskInstanceState.FAILED,
             start_date=start_time,
             end_date=end_time,
             error_message=str(e),
+        )
+
+        # Raise ApplicationError with structured details as positional args
+        # Temporal's Pydantic converter will serialize the model automatically
+        # non_retryable=True indicates failure is permanent for this attempt
+        raise ApplicationError(
+            f"Task execution failed: {input.dag_id}.{input.task_id}",
+            failure_details,
+            type="TaskExecutionFailure",
+            non_retryable=True,
         )
