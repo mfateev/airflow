@@ -39,7 +39,7 @@ def run_tests_with_watch():
     # Command to run
     cmd = [
         "breeze", "shell", "-c",
-        "pytest /files/temporal_airflow/tests/ -v -s"
+        "pytest /opt/airflow/providers/temporal_airflow/tests/ -v -s"
     ]
 
     # Buffer to keep last 10 lines
