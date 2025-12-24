@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from airflow.utils.state import TaskInstanceState
 
 # ============================================================================
-# Activity Models
+# Activity Models (Executor Pattern)
 # ============================================================================
 
 
@@ -29,15 +30,24 @@ class TaskExecutionFailureDetails(BaseModel):
     error_message: str = Field(..., description="Error message from exception")
 
 
-class TaskExecutionInput(BaseModel):
+class ActivityTaskInput(BaseModel):
     """
-    Input model for task execution activity.
+    Input model for task execution activity (Executor Pattern).
 
-    Decision 7: Passes only serialized_task, not entire DAG.
-    This reduces Temporal history size by ~100x.
+    This model uses the executor pattern: activities load DAG from file
+    instead of receiving serialized operators. This provides:
+    - Real operators with real callables (no serialization issues)
+    - Full feature support (callbacks, context, XCom, etc.)
+    - Simpler code and easier debugging
+
+    Architecture:
+    - Activities receive only JSON-serializable metadata
+    - Activities load DAG file and extract task operator
+    - Activities execute task and return JSON result
+    - Workflow updates in-memory DB based on result
     """
 
-    # Task identification
+    # Task identification (metadata only)
     dag_id: str = Field(..., description="DAG identifier")
     task_id: str = Field(..., description="Task identifier")
     run_id: str = Field(..., description="DAG run identifier")
@@ -47,17 +57,18 @@ class TaskExecutionInput(BaseModel):
     try_number: int = Field(default=1, description="Retry attempt number")
     map_index: int = Field(default=-1, description="Mapped task index (-1 for non-mapped)")
 
-    # Task definition (NOT full DAG - Decision 7)
-    serialized_task: dict[str, Any] = Field(..., description="Serialized task operator")
+    # DAG file location (instead of serialized operator)
+    dag_rel_path: str = Field(..., description="Relative path to DAG file from DAGS_FOLDER")
 
-    # Execution context
+    # Execution context (passed from workflow)
     upstream_results: dict[str, Any] | None = Field(
         default=None,
         description="XCom values from upstream tasks",
     )
 
-    # Queue for task routing (Decision 9)
+    # Additional metadata
     queue: str | None = Field(default=None, description="Task queue for routing")
+    pool_slots: int = Field(default=1, description="Number of pool slots required")
 
 
 class TaskExecutionResult(BaseModel):
@@ -148,3 +159,19 @@ class DagExecutionResult(BaseModel):
             }
         }
     )
+
+
+class DagExecutionFailureDetails(BaseModel):
+    """
+    Details passed in ApplicationError when DAG execution fails.
+
+    This provides structured error information about the failed DAG run.
+    """
+
+    dag_id: str = Field(..., description="DAG identifier")
+    run_id: str = Field(..., description="DAG run identifier")
+    start_date: datetime = Field(..., description="DAG run start time")
+    end_date: datetime = Field(..., description="DAG run end time")
+    tasks_succeeded: int = Field(..., description="Number of successful tasks")
+    tasks_failed: int = Field(..., description="Number of failed tasks")
+    error_message: str = Field(..., description="Error summary")

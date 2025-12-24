@@ -17,7 +17,7 @@ with workflow.unsafe.imports_passed_through():
     from airflow.models.dag_version import DagVersion
     from airflow.models.taskinstance import TaskInstance, TaskInstanceState
     from airflow.models.trigger import Trigger  # Required for Callback foreign key
-    from airflow.serialization.serialized_objects import SerializedDAG, SerializedBaseOperator
+    from airflow.serialization.serialized_objects import SerializedDAG  # Still needed for DAG deserialization
     from airflow._shared.timezones import timezone as airflow_timezone
     from temporal_airflow.time_provider import set_workflow_time, clear_workflow_time
     from sqlalchemy import create_engine
@@ -28,7 +28,8 @@ with workflow.unsafe.imports_passed_through():
 from temporal_airflow.models import (
     DagExecutionInput,
     DagExecutionResult,
-    TaskExecutionInput,
+    DagExecutionFailureDetails,
+    ActivityTaskInput,  # New executor pattern model
     TaskExecutionResult,
     TaskExecutionFailureDetails,
 )
@@ -115,7 +116,25 @@ class ExecuteAirflowDagWorkflow:
             finally:
                 session.close()
 
-            # Return result
+            # If DAG failed, raise ApplicationError with structured details
+            if final_state == "failed":
+                failure_details = DagExecutionFailureDetails(
+                    dag_id=input.dag_id,
+                    run_id=input.run_id,
+                    start_date=start_time,
+                    end_date=end_time,
+                    tasks_succeeded=tasks_succeeded,
+                    tasks_failed=tasks_failed,
+                    error_message=f"DAG execution failed: {tasks_failed} task(s) failed",
+                )
+                raise ApplicationError(
+                    f"DAG execution failed: {input.dag_id} / {input.run_id}",
+                    failure_details,
+                    type="DagExecutionFailure",
+                    non_retryable=True,
+                )
+
+            # Return result for successful execution
             return DagExecutionResult(
                 state=final_state,
                 dag_id=input.dag_id,
@@ -324,35 +343,44 @@ class ExecuteAirflowDagWorkflow:
 
                         # TODO Phase 5: Check pool availability
 
-                        # Commit 6: Extract and serialize ONLY this task (Decision 7)
+                        # Executor Pattern: Pass DAG file path instead of serialized operator
+                        # Activities will load DAG from file and extract task
                         task = self.dag.get_task(ti.task_id)
-                        serialized_task = SerializedBaseOperator.serialize_operator(task)
 
-                        # Commit 6: Gather upstream XCom (Decision 7)
+                        # Gather upstream XCom
                         upstream_results = self._get_upstream_xcom(ti, task)
 
-                        # Commit 6: Start activity directly (Decision 2)
+                        # Create DAG file path (relative to DAGS_FOLDER)
+                        # TODO Phase 4: Get real DAG file path from DagModel or config
+                        # For now, use simple pattern: {dag_id}.py (DAGS_FOLDER already includes "dags")
+                        dag_rel_path = f"{ti.dag_id}.py"
+
+                        # Start activity directly (Decision 2)
                         # TODO Phase 5: Implement queue routing (Decision 9)
                         # For now, always use workflow's task queue to ensure worker picks up activities
                         activity_queue = workflow.info().task_queue
 
                         workflow.logger.info(
                             f"Starting activity for {ti_key} on queue '{activity_queue}' "
-                            f"(workflow queue={workflow.info().task_queue}, ti.queue={ti.queue})"
+                            f"(dag_rel_path={dag_rel_path})"
                         )
 
                         handle = workflow.start_activity(
                             run_airflow_task,
-                            arg=TaskExecutionInput(
+                            arg=ActivityTaskInput(
+                                # Task metadata (JSON-serializable)
                                 dag_id=ti.dag_id,
                                 task_id=ti.task_id,
                                 run_id=ti.run_id,
                                 logical_date=dag_run.logical_date,
                                 try_number=ti.try_number,
                                 map_index=ti.map_index,
-                                serialized_task=serialized_task,  # Just this task!
+                                # DAG file path (instead of serialized operator)
+                                dag_rel_path=dag_rel_path,
+                                # Execution context
                                 upstream_results=upstream_results,
-                                queue=ti.queue,  # Preserved for Phase 5 queue routing
+                                queue=ti.queue,
+                                pool_slots=ti.pool_slots,
                             ),
                             task_queue=activity_queue,  # Use workflow's queue for now
                             start_to_close_timeout=timedelta(hours=2),

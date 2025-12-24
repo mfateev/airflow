@@ -10,80 +10,109 @@ from airflow.utils.state import TaskInstanceState
 from temporal_airflow.models import (
     DagExecutionInput,
     DagExecutionResult,
-    TaskExecutionInput,
+    ActivityTaskInput,  # New executor pattern model
     TaskExecutionResult,
 )
 
 
-class TestTaskExecutionInput:
-    """Test TaskExecutionInput model validation."""
+class TestActivityTaskInput:
+    """Test ActivityTaskInput model validation (Executor Pattern)."""
 
-    def test_valid_input_bar(self):
-        """Test valid TaskExecutionInput creation."""
-        input = TaskExecutionInput(
+    def test_valid_input(self):
+        """Test valid ActivityTaskInput creation."""
+        input = ActivityTaskInput(
             dag_id="test_dag",
             task_id="test_task",
             run_id="test_run",
             logical_date=datetime(2025, 1, 1),
-            serialized_task={"_task_type": "PythonOperator"},
+            dag_rel_path="dags/test_dag.py",
         )
         assert input.dag_id == "test_dag"
         assert input.task_id == "test_task"
         assert input.run_id == "test_run"
+        assert input.dag_rel_path == "dags/test_dag.py"
         assert input.try_number == 1  # Default
         assert input.map_index == -1  # Default
         assert input.queue is None  # Default
+        assert input.pool_slots == 1  # Default
 
     def test_missing_required_field(self):
         """Test validation fails when required field missing."""
         with pytest.raises(ValidationError):
-            TaskExecutionInput(dag_id="test")
+            ActivityTaskInput(dag_id="test")
 
     def test_with_optional_fields(self):
-        """Test TaskExecutionInput with optional fields."""
-        input = TaskExecutionInput(
+        """Test ActivityTaskInput with optional fields."""
+        input = ActivityTaskInput(
             dag_id="test_dag",
             task_id="test_task",
             run_id="test_run",
             logical_date=datetime(2025, 1, 1),
-            serialized_task={},
+            dag_rel_path="dags/test_dag.py",
             try_number=2,
             map_index=5,
             upstream_results={"task1": "value1"},
             queue="high_priority",
+            pool_slots=2,
         )
         assert input.try_number == 2
         assert input.map_index == 5
         assert input.upstream_results == {"task1": "value1"}
         assert input.queue == "high_priority"
+        assert input.pool_slots == 2
 
     def test_serialization(self):
-        """Test model serialization to dict."""
-        input = TaskExecutionInput(
+        """Test model serialization to dict (for Temporal JSON serialization)."""
+        input = ActivityTaskInput(
             dag_id="test_dag",
             task_id="test_task",
             run_id="test_run",
             logical_date=datetime(2025, 1, 1, 12, 0, 0),
-            serialized_task={"_task_type": "PythonOperator"},
+            dag_rel_path="dags/test_dag.py",
         )
 
         data = input.model_dump()
         assert data["dag_id"] == "test_dag"
         assert data["task_id"] == "test_task"
+        assert data["dag_rel_path"] == "dags/test_dag.py"
         assert isinstance(data["logical_date"], datetime)
 
     def test_deserialization(self):
-        """Test creating model from dict."""
+        """Test creating model from dict (for Temporal JSON deserialization)."""
         data = {
             "dag_id": "test_dag",
             "task_id": "test_task",
             "run_id": "test_run",
             "logical_date": datetime(2025, 1, 1),
-            "serialized_task": {},
+            "dag_rel_path": "dags/test_dag.py",
         }
 
-        input = TaskExecutionInput(**data)
+        input = ActivityTaskInput(**data)
         assert input.dag_id == "test_dag"
+        assert input.dag_rel_path == "dags/test_dag.py"
+
+    def test_json_serialization(self):
+        """Test model can be serialized to JSON (required for Temporal)."""
+        input = ActivityTaskInput(
+            dag_id="test_dag",
+            task_id="test_task",
+            run_id="test_run",
+            logical_date=datetime(2025, 1, 1, 12, 0, 0),
+            dag_rel_path="dags/test_dag.py",
+            upstream_results={"task1": {"result": "value1"}},
+        )
+
+        # Should be JSON-serializable
+        json_str = input.model_dump_json()
+        assert isinstance(json_str, str)
+        assert "test_dag" in json_str
+        assert "dags/test_dag.py" in json_str
+
+        # Should be able to deserialize from JSON
+        input2 = ActivityTaskInput.model_validate_json(json_str)
+        assert input2.dag_id == input.dag_id
+        assert input2.dag_rel_path == input.dag_rel_path
+        assert input2.upstream_results == input.upstream_results
 
 
 class TestTaskExecutionResult:
