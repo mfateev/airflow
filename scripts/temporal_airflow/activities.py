@@ -155,9 +155,9 @@ async def run_airflow_task(input: ActivityTaskInput) -> TaskExecutionResult:
         # Step 4: Execute task with real operator (NO serialization!)
         # This is the key benefit: we have real callables, not string representations
         # Add ExecutorSafeguard sentinel to allow direct execute() calls outside Task Runner
+        # NOTE: Must pass as kwarg, not in context dict (ExecutorSafeguard checks kwargs)
         sentinel_key = f"{task.__class__.__name__}__sentinel"
-        context[sentinel_key] = ExecutorSafeguard.sentinel_value
-        result = task.execute(context)
+        result = task.execute(context, **{sentinel_key: ExecutorSafeguard.sentinel_value})
 
         activity.logger.info(
             f"Task executed successfully, result type: {type(result).__name__}"
