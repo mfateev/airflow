@@ -231,29 +231,37 @@ async def test_dag_run_creation():
             assert result.dag_id == "test_dag"
 
 
-@pytest.mark.skip(reason="Phase 2: Requires DAG file in /files/dags/ for executor pattern. Will be updated in Phase 3/4.")
 @pytest.mark.asyncio
 async def test_scheduling_loop_structure():
     """Test that loop structure works (completion in Commit 5)."""
-    from airflow import DAG
-    from airflow.operators.python import PythonOperator
+    import sys
+    from pathlib import Path
     from airflow.serialization.serialized_objects import SerializedDAG
     from temporal_airflow.activities import run_airflow_task
-    from temporalio.client import WorkflowFailureError
-    from temporalio.exceptions import ApplicationError
 
-    # Create simple DAG with actual Python code
-    def loop_test_task():
-        return "loop iteration complete"
+    # Load DAG from file (executor pattern)
+    dag_file = Path(__file__).parent.parent / "test_loop_structure.py"
 
-    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
-        PythonOperator(task_id="task1", python_callable=loop_test_task)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_loop_structure", dag_file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
+    # Find DAG in module
+    from airflow.sdk.definitions.dag import DAG
+    dag = None
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if isinstance(attr, DAG) and attr.dag_id == "test_loop_structure":
+            dag = attr
+            break
+
+    assert dag is not None, "Could not find test_loop_structure DAG"
     serialized = SerializedDAG.to_dict(dag)
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
         input_data = DagExecutionInput(
-            dag_id="test_dag",
+            dag_id="test_loop_structure",
             run_id="test_run",
             logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
@@ -265,18 +273,19 @@ async def test_scheduling_loop_structure():
             workflows=[ExecuteAirflowDagWorkflow],
             activities=[run_airflow_task],
         ):
-            # Test expects workflow to fail with ApplicationError due to deserialization bug
-            with pytest.raises(WorkflowFailureError) as exc_info:
-                await env.client.execute_workflow(
-                    ExecuteAirflowDagWorkflow.run,
-                    input_data,
-                    id="test-loop-structure",
-                    task_queue="test-queue",
-                )
+            # After Phase 2, workflow should complete successfully
+            result = await env.client.execute_workflow(
+                ExecuteAirflowDagWorkflow.run,
+                input_data,
+                id="test-loop-structure",
+                task_queue="test-queue",
+            )
 
-            # Verify it's a DagExecutionFailure ApplicationError
-            assert isinstance(exc_info.value.cause, ApplicationError)
-            assert exc_info.value.cause.type == "DagExecutionFailure"
+            # Verify successful completion
+            assert result.state == "success"
+            assert result.dag_id == "test_loop_structure"
+            assert result.tasks_succeeded == 1
+            assert result.tasks_failed == 0
 
 
 @pytest.mark.asyncio
@@ -369,27 +378,36 @@ async def test_end_to_end_dag_execution():
             assert result.tasks_succeeded >= 2  # Both tasks ran
 
 
-@pytest.mark.skip(reason="Phase 2: Requires DAG file in /files/dags/ for executor pattern. Will be updated in Phase 3/4.")
 @pytest.mark.asyncio
 async def test_parallel_task_execution():
     """Test that parallel tasks execute concurrently."""
-    from airflow import DAG
-    from airflow.operators.python import PythonOperator
+    from pathlib import Path
     from airflow.serialization.serialized_objects import SerializedDAG
     from temporal_airflow.activities import run_airflow_task
 
-    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
-        t1 = PythonOperator(task_id="task1", python_callable=lambda: "a")
-        t2 = PythonOperator(task_id="task2", python_callable=lambda: "b")
-        t3 = PythonOperator(task_id="task3", python_callable=lambda: "c")
-        # All can run in parallel
-        [t1, t2, t3]
+    # Load DAG from file (executor pattern)
+    dag_file = Path(__file__).parent.parent / "test_parallel.py"
 
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_parallel", dag_file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Find DAG in module
+    from airflow.sdk.definitions.dag import DAG
+    dag = None
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if isinstance(attr, DAG) and attr.dag_id == "test_parallel":
+            dag = attr
+            break
+
+    assert dag is not None, "Could not find test_parallel DAG"
     serialized = SerializedDAG.to_dict(dag)
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
         input_data = DagExecutionInput(
-            dag_id="test_dag",
+            dag_id="test_parallel",
             run_id="test_run",
             logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
@@ -408,8 +426,11 @@ async def test_parallel_task_execution():
                 task_queue="test-queue",
             )
 
+            # Verify successful parallel execution
             assert result.state == "success"
+            assert result.dag_id == "test_parallel"
             assert result.tasks_succeeded == 3
+            assert result.tasks_failed == 0
 
 
 @pytest.mark.asyncio
@@ -468,35 +489,39 @@ async def test_task_failure_with_application_error():
             assert failure_details.tasks_succeeded == 0
 
 
-@pytest.mark.skip(reason="Phase 2: Requires DAG file in /files/dags/ for executor pattern. Will be updated in Phase 3/4.")
 @pytest.mark.asyncio
 async def test_mixed_success_and_failure_tasks():
     """Test DAG with both successful and failing tasks."""
-    from airflow import DAG
-    from airflow.operators.python import PythonOperator
+    from pathlib import Path
     from airflow.serialization.serialized_objects import SerializedDAG
     from temporal_airflow.activities import run_airflow_task
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ApplicationError
     from temporal_airflow.models import DagExecutionFailureDetails
 
-    def failing_task():
-        raise RuntimeError("Task failure")
+    # Load DAG from file (executor pattern)
+    dag_file = Path(__file__).parent.parent / "test_mixed_results.py"
 
-    def success_task():
-        return "success"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_mixed_results", dag_file)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
-    with DAG(dag_id="test_dag", start_date=timezone.datetime(2025, 1, 1)) as dag:
-        t1 = PythonOperator(task_id="success_task", python_callable=success_task)
-        t2 = PythonOperator(task_id="failing_task", python_callable=failing_task)
-        # Parallel execution
-        [t1, t2]
+    # Find DAG in module
+    from airflow.sdk.definitions.dag import DAG
+    dag = None
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if isinstance(attr, DAG) and attr.dag_id == "test_mixed_results":
+            dag = attr
+            break
 
+    assert dag is not None, "Could not find test_mixed_results DAG"
     serialized = SerializedDAG.to_dict(dag)
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
         input_data = DagExecutionInput(
-            dag_id="test_dag",
+            dag_id="test_mixed_results",
             run_id="test_run",
             logical_date=timezone.datetime(2025, 1, 1),
             serialized_dag=serialized,
