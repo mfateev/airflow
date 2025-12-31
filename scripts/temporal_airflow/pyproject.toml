@@ -5,7 +5,7 @@ description = "Temporal integration for Apache Airflow"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
-    "temporalio>=1.4.0",
+    "temporalio>=1.9.0",  # Requires 1.9.0+ for envconfig support
     "structlog>=23.0.0",
 ]
 

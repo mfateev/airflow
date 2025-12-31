@@ -63,6 +63,7 @@ version = "3.2.0"
 dependencies = [
     "apache-airflow-task-sdk<1.3.0,>=1.2.0",
     "apache-airflow-core==3.2.0",
+    "temporalio>=1.9.0",
 ]
 
 packages = []
@@ -1451,6 +1452,8 @@ apache-airflow-providers-yandex = { workspace = true }
 apache-airflow-providers-ydb = { workspace = true }
 apache-airflow-providers-zendesk = { workspace = true }
 # End of automatically generated provider workspace items
+# Temporal integration
+temporal-airflow = { workspace = true }
 
 [tool.uv.workspace]
 members = [
@@ -1575,4 +1578,6 @@ members = [
     "providers/ydb",
     "providers/zendesk",
     # End of automatically generated provider workspace members
+    # Temporal integration
+    "scripts/temporal_airflow",
 ]

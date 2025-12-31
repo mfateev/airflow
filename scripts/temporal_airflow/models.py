@@ -45,6 +45,10 @@ class ActivityTaskInput(BaseModel):
     - Activities load DAG file and extract task operator
     - Activities execute task and return JSON result
     - Workflow updates in-memory DB based on result
+
+    Standalone Mode Support:
+    - connections: Passed from workflow, set as AIRFLOW_CONN_* env vars
+    - variables: Passed from workflow, set as AIRFLOW_VAR_* env vars
     """
 
     # Task identification (metadata only)
@@ -69,6 +73,16 @@ class ActivityTaskInput(BaseModel):
     # Additional metadata
     queue: str | None = Field(default=None, description="Task queue for routing")
     pool_slots: int = Field(default=1, description="Number of pool slots required")
+
+    # Standalone mode support: connections/variables passed from workflow
+    connections: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description="Connection definitions (set as AIRFLOW_CONN_* env vars)",
+    )
+    variables: dict[str, str] | None = Field(
+        default=None,
+        description="Variable definitions (set as AIRFLOW_VAR_* env vars)",
+    )
 
 
 class TaskExecutionResult(BaseModel):
@@ -114,6 +128,10 @@ class DagExecutionInput(BaseModel):
 
     Decision 3: Full serialized_dag passed to workflow (once),
     then workflow extracts individual tasks for activities.
+
+    Standalone Mode Support:
+    - connections: Pass connection definitions directly (no Airflow DB needed)
+    - variables: Pass variable definitions directly (no Airflow DB needed)
     """
 
     dag_id: str = Field(..., description="DAG identifier")
@@ -121,6 +139,22 @@ class DagExecutionInput(BaseModel):
     logical_date: datetime = Field(..., description="Logical execution date")
     conf: dict[str, Any] | None = Field(default=None, description="DAG run configuration")
     serialized_dag: dict[str, Any] = Field(..., description="Serialized DAG definition")
+
+    # Standalone mode support: pass connections/variables without Airflow DB
+    connections: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Connection definitions keyed by connection ID. "
+            "Example: {'postgres_default': {'conn_type': 'postgres', 'host': 'localhost', ...}}"
+        ),
+    )
+    variables: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Variable definitions keyed by variable name. "
+            "Example: {'api_key': 'secret123', 'environment': 'prod'}"
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -130,6 +164,17 @@ class DagExecutionInput(BaseModel):
                 "logical_date": "2025-01-01T00:00:00Z",
                 "conf": {},
                 "serialized_dag": {"tasks": []},
+                "connections": {
+                    "postgres_default": {
+                        "conn_type": "postgres",
+                        "host": "localhost",
+                        "port": 5432,
+                        "login": "airflow",
+                        "password": "airflow",
+                        "schema": "airflow",
+                    }
+                },
+                "variables": {"environment": "dev", "api_key": "test_key"},
             }
         }
     )

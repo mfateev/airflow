@@ -61,6 +61,10 @@ class ExecuteAirflowDagWorkflow:
         # Decision 7: XCom state in workflow
         self.xcom_store: dict[tuple, Any] = {}  # ti_key -> xcom_data
 
+        # Standalone mode: connections/variables passed to activities
+        self.connections: dict[str, dict[str, Any]] | None = None
+        self.variables: dict[str, str] | None = None
+
         # TODO Phase 5: Add pool_usage tracking
 
     @workflow.run
@@ -85,6 +89,10 @@ class ExecuteAirflowDagWorkflow:
             # Commit 2: Store and deserialize DAG (Decision 3)
             self.serialized_dag = input.serialized_dag
             self.dag = SerializedDAG.from_dict(self.serialized_dag)
+
+            # Standalone mode: Store connections/variables for passing to activities
+            self.connections = input.connections
+            self.variables = input.variables
 
             workflow.logger.info(f"Deserialized DAG: {self.dag.dag_id}")
 
@@ -381,6 +389,9 @@ class ExecuteAirflowDagWorkflow:
                                 upstream_results=upstream_results,
                                 queue=ti.queue,
                                 pool_slots=ti.pool_slots,
+                                # Standalone mode: pass connections/variables to activity
+                                connections=self.connections,
+                                variables=self.variables,
                             ),
                             task_queue=activity_queue,  # Use workflow's queue for now
                             start_to_close_timeout=timedelta(hours=2),
