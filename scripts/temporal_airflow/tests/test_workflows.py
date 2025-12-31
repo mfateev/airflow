@@ -1,5 +1,7 @@
 """Tests for Temporal workflows."""
 import asyncio
+import os
+from pathlib import Path
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
@@ -9,6 +11,23 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxR
 from airflow._shared.timezones import timezone
 from temporal_airflow.workflows import ExecuteAirflowDagWorkflow
 from temporal_airflow.models import DagExecutionInput
+
+
+# Set DAGS_FOLDER to the directory containing test DAGs
+# This is needed because the executor pattern loads DAGs from files
+TEST_DAGS_FOLDER = Path(__file__).parent.parent
+
+
+@pytest.fixture(autouse=True)
+def set_dags_folder():
+    """Set AIRFLOW__CORE__DAGS_FOLDER to test DAGs directory for all tests."""
+    old_value = os.environ.get("AIRFLOW__CORE__DAGS_FOLDER")
+    os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = str(TEST_DAGS_FOLDER)
+    yield
+    if old_value is None:
+        os.environ.pop("AIRFLOW__CORE__DAGS_FOLDER", None)
+    else:
+        os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = old_value
 
 
 # Configure sandbox to pass through problematic modules
