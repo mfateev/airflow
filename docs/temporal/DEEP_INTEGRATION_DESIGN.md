@@ -126,9 +126,9 @@ query = (
 │  │  └─ Call sync_status activity → updates Airflow DB                │  │
 │  │                                                                   │  │
 │  │  create_dagrun_record Activity (FIRST activity)                   │  │
-│  │  ├─ Creates DagRun record with state=RUNNING                      │  │
+│  │  ├─ Creates DagRun with run_type=EXTERNAL, state=RUNNING         │  │
 │  │  ├─ Creates TaskInstance records for all tasks                    │  │
-│  │  └─ Returns run_id for subsequent activities                      │  │
+│  │  └─ Returns run_id (scheduler ignores EXTERNAL runs)              │  │
 │  │                                                                   │  │
 │  │  run_airflow_task Activity                                        │  │
 │  │  ├─ Load operator from DAG file
@@ -179,6 +179,7 @@ query = (
                     ▼
 3. Workflow's FIRST activity: create_dagrun_record
    - Creates DagRun in DB with state = RUNNING
+   - Sets run_type = EXTERNAL (scheduler ignores this run!)
    - Creates TaskInstance records for all tasks
    - Returns run_id for subsequent activities
                     │
@@ -253,8 +254,8 @@ Airflow UI shows updated task state
                     │
                     ▼
 3. Workflow's FIRST activity: create_dagrun_record
-   - Creates DagRun with run_type = scheduled
-   - state = RUNNING
+   - Creates DagRun with run_type = EXTERNAL
+   - state = RUNNING (scheduler ignores this run!)
    - Returns run_id
                     │
                     ▼
