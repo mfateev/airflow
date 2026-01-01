@@ -16,6 +16,50 @@ This document describes **Deep Integration Mode** - a deployment model where:
 
 **Key Principle**: Temporal owns execution, Airflow owns user experience.
 
+**Implementation Approach**: Direct database access via Airflow models, requiring only **~7 lines of Airflow code changes** to mark externally-managed runs.
+
+---
+
+## Required Airflow Changes (Minimal)
+
+To enable external execution while preventing the scheduler from interfering, only **two small changes** are needed in the Airflow codebase:
+
+### Change 1: Add EXTERNAL to DagRunType Enum (~3 lines)
+
+```python
+# airflow/utils/types.py
+
+class DagRunType(str, enum.Enum):
+    """Class with DagRun types."""
+    BACKFILL_JOB = "backfill"
+    SCHEDULED = "scheduled"
+    MANUAL = "manual"
+    ASSET_TRIGGERED = "asset_triggered"
+    EXTERNAL = "external"  # ← ADD THIS: Externally managed (Temporal, etc.)
+```
+
+### Change 2: Filter External Runs from Scheduler (~4 lines)
+
+```python
+# airflow/models/dagrun.py
+
+# In get_running_dag_runs_to_examine() method (line ~595):
+query = (
+    select(cls)
+    .where(cls.state == DagRunState.RUNNING)
+    .where(cls.run_type != DagRunType.EXTERNAL)  # ← ADD THIS
+    # ... rest of query
+)
+
+# In get_queued_dag_runs_to_set_running() method (line ~635):
+# Same filter added
+```
+
+**That's it.** With these changes:
+- External systems create DagRuns with `run_type='external'`
+- Airflow scheduler completely ignores these runs
+- Temporal has full control over execution and state management
+
 ---
 
 ## Design Principles
@@ -25,6 +69,7 @@ This document describes **Deep Integration Mode** - a deployment model where:
 3. **Airflow DB stores configuration** - Connections, Variables, Pools read by activities
 4. **UI unchanged** - Zero changes to Airflow webserver, users see familiar interface
 5. **Gradual migration** - Can run alongside traditional executors
+6. **Direct DB access** - Activities import Airflow models and write directly to database (no REST API limitations)
 
 ---
 
@@ -333,16 +378,32 @@ class TemporalScheduleTrigger:
         log.info(f"Started workflow {workflow_id} for {dag_model.dag_id}")
 ```
 
-### Component 2: DagRun Creation Activity
+### Component 2: DagRun Creation Activity (Direct DB Access)
 
-The workflow's first activity creates the DagRun record:
+The workflow's first activity creates the DagRun record using **direct database access** via Airflow models. This approach:
+- Has no REST API limitations (can set any state including RUNNING)
+- Can create TaskInstance records directly
+- Uses `run_type='external'` so scheduler ignores this run
 
 ```python
 # scripts/temporal_airflow/activities.py (additions)
 
+import os
+# Configure Airflow database connection
+os.environ.setdefault(
+    "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN",
+    "postgresql://airflow:airflow@localhost:5432/airflow"
+)
+
+from airflow import settings
 from airflow.models import DagRun, TaskInstance
+from airflow.models.serialized_dag import SerializedDagModel
 from airflow.utils.session import create_session
 from airflow.utils.state import TaskInstanceState, DagRunState
+from airflow.utils.types import DagRunType
+
+# Initialize ORM (required for external code)
+settings.configure_orm()
 
 
 @dataclass
@@ -351,8 +412,7 @@ class CreateDagRunInput:
     dag_id: str
     logical_date: datetime
     conf: dict
-    run_type: str  # "manual", "scheduled", "backfill"
-    external_trigger: bool = False
+    triggered_by: str = "temporal"  # For audit trail
 
 
 @dataclass
@@ -367,6 +427,11 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
     """
     Create DagRun and TaskInstance records in Airflow database.
 
+    Uses DIRECT DATABASE ACCESS via Airflow models:
+    - No REST API limitations
+    - Can set any state including RUNNING
+    - Uses run_type='external' so scheduler ignores this run
+
     This is the FIRST activity called by the workflow, ensuring:
     - No orphan DagRuns if workflow fails to start
     - Temporal owns execution from the beginning
@@ -377,18 +442,19 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
     )
 
     with create_session() as session:
-        # Generate run_id
-        run_id = f"{input.run_type}__{input.logical_date.strftime('%Y-%m-%dT%H:%M:%S')}"
+        # Generate run_id with 'external' prefix
+        run_id = f"external__{input.logical_date.strftime('%Y-%m-%dT%H:%M:%S')}"
 
-        # Create DagRun
+        # Create DagRun with run_type=EXTERNAL
+        # This tells the Airflow scheduler to IGNORE this run completely
         dag_run = DagRun(
             dag_id=input.dag_id,
             run_id=run_id,
             logical_date=input.logical_date,
             conf=input.conf,
-            state=DagRunState.RUNNING,  # Already running!
-            run_type=DagRunType(input.run_type),
-            external_trigger=input.external_trigger,
+            state=DagRunState.RUNNING,  # Can set RUNNING directly!
+            run_type=DagRunType.EXTERNAL,  # ← KEY: Scheduler ignores this
+            external_trigger=True,
             start_date=datetime.utcnow(),
         )
         session.add(dag_run)
@@ -396,7 +462,7 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
 
         # Create TaskInstance records for all tasks in the DAG
         # (Workflow will update their states as they execute)
-        serialized = SerializedDagModel.get(input.dag_id)
+        serialized = SerializedDagModel.get(input.dag_id, session=session)
         if serialized:
             dag = serialized.dag
             for task in dag.tasks:
@@ -411,9 +477,19 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
 
         session.commit()
 
-        activity.logger.info(f"Created DagRun {run_id} with ID {dag_run.id}")
+        activity.logger.info(f"Created DagRun {run_id} (type=external) with ID {dag_run.id}")
         return CreateDagRunResult(run_id=run_id, dag_run_id=dag_run.id)
 ```
+
+**Why Direct DB Access?**
+
+| Aspect | REST API | Direct DB Access |
+|--------|----------|------------------|
+| Set RUNNING state | ❌ Not allowed | ✅ Full control |
+| Create TaskInstances | ❌ No endpoint | ✅ Direct insert |
+| Set run_type=external | ❌ Not exposed | ✅ Full control |
+| Decoupling | ✅ HTTP only | ⚠️ Needs airflow package |
+| Version sensitivity | ✅ API versioned | ⚠️ Must match schema |
 
 ### Component 3: Status Sync Activities
 
@@ -903,18 +979,33 @@ export AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
 
 ## Implementation Phases
 
+### Airflow Changes (PR to Airflow)
+
+| Phase | Work | Effort | Files |
+|-------|------|--------|-------|
+| **Phase 0** | Add `DagRunType.EXTERNAL` + scheduler filter | Tiny (~7 lines) | `types.py`, `dagrun.py` |
+
+### External Implementation (No Airflow Changes)
+
 | Phase | Work | Effort | Dependencies |
 |-------|------|--------|--------------|
-| **Phase 1** | Add create_dagrun_record activity (workflow-first pattern) | Small | None |
+| **Phase 1** | Add create_dagrun_record activity with direct DB access | Small | Phase 0 |
 | **Phase 2** | Add sync activities (sync_task_status, sync_dagrun_status) | Small | Phase 1 |
 | **Phase 3** | Modify workflow to call create_dagrun first, then sync activities | Small | Phase 2 |
 | **Phase 4** | Create Temporal Schedule Trigger Service | Medium | Phase 3 |
-| **Phase 5** | Extend API for direct workflow trigger (no DB write) | Small | Phase 3 |
+| **Phase 5** | Extend Airflow API for direct workflow trigger (optional) | Small | Phase 3 |
 | **Phase 6** | Add Airflow configuration section | Small | Phase 4 |
 | **Phase 7** | Pool support (read limits, enforce in workflow) | Medium | Phase 4 |
 | **Phase 8** | Documentation and migration guide | Medium | Phase 6 |
 | **Phase 9** | Dataset trigger integration | Large | Phase 8 |
 | **Phase 10** | Sensor as durable activity pattern | Large | Phase 8 |
+
+### Future (HTTP API Approach)
+
+| Phase | Work | Effort | Dependencies |
+|-------|------|--------|--------------|
+| **Future 1** | REST API changes to allow RUNNING state | Medium (~70 lines) | Airflow acceptance |
+| **Future 2** | Migrate activities from direct DB to HTTP calls | Medium | Future 1 |
 
 ---
 
@@ -963,6 +1054,109 @@ export AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
 
 ---
 
+## Future Consideration: HTTP API Approach
+
+While the direct database access approach is recommended for initial implementation, a fully HTTP-based approach could provide better decoupling in the future. This section documents what Airflow REST API changes would be needed.
+
+### Current REST API Limitations
+
+| Operation | Status | Limitation |
+|-----------|--------|------------|
+| Create DagRun | ✅ Works | Cannot set `run_type=external` |
+| Set DagRun → RUNNING | ❌ Blocked | `DAGRunPatchStates` enum excludes RUNNING |
+| Set TaskInstance → RUNNING | ❌ Blocked | `validate_new_state()` excludes RUNNING |
+| Create TaskInstance | ❌ No endpoint | Endpoint doesn't exist |
+
+### Required Airflow REST API Changes (~70 lines)
+
+#### 1. Allow `run_type` in POST /dagRuns
+
+```python
+# airflow/api_fastapi/core_api/datamodels/dag_run.py
+
+class TriggerDAGRunPostBody(StrictBaseModel):
+    # ... existing fields ...
+    run_type: DagRunType | None = None  # ← ADD: Allow specifying EXTERNAL
+```
+
+#### 2. Allow RUNNING in PATCH /dagRuns
+
+```python
+# airflow/api_fastapi/core_api/datamodels/dag_run.py
+
+class DAGRunPatchStates(str, Enum):
+    QUEUED = DagRunState.QUEUED
+    SUCCESS = DagRunState.SUCCESS
+    FAILED = DagRunState.FAILED
+    RUNNING = DagRunState.RUNNING  # ← ADD
+```
+
+Plus handler logic in `patch_dag_run()` to call `set_dag_run_state_to_running()`.
+
+#### 3. Allow RUNNING/SCHEDULED in PATCH /taskInstances
+
+```python
+# airflow/api_fastapi/core_api/datamodels/task_instances.py
+
+@field_validator("new_state", mode="before")
+def validate_new_state(cls, ns):
+    valid_states = [
+        vs.name.lower() for vs in (
+            TaskInstanceState.SUCCESS,
+            TaskInstanceState.FAILED,
+            TaskInstanceState.SKIPPED,
+            TaskInstanceState.RUNNING,    # ← ADD
+            TaskInstanceState.SCHEDULED,  # ← ADD
+        )
+    ]
+```
+
+#### 4. Add POST /taskInstances Endpoint (~50 lines)
+
+```python
+# airflow/api_fastapi/core_api/routes/public/task_instances.py
+
+@task_instances_router.post(
+    "/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances",
+)
+async def create_task_instance(
+    dag_id: str,
+    dag_run_id: str,
+    body: CreateTaskInstanceBody,
+):
+    """Create TaskInstance for externally managed DagRun."""
+    # Verify DagRun exists and is EXTERNAL type
+    # Create TaskInstance record
+    pass
+```
+
+### HTTP Approach: Benefits and Tradeoffs
+
+| Aspect | Direct DB | HTTP API |
+|--------|-----------|----------|
+| **Decoupling** | Tight (needs airflow package) | Loose (HTTP only) |
+| **Version sensitivity** | Must match DB schema | API versioned |
+| **Deployment** | Same Python environment | Any language/platform |
+| **Performance** | Fast (direct DB) | Slower (HTTP overhead) |
+| **Airflow changes** | ~7 lines | ~70 lines |
+| **Implementation effort** | Lower | Higher |
+
+### Recommendation
+
+**Start with Direct DB Access** for these reasons:
+1. Minimal Airflow changes (~7 lines vs ~70 lines)
+2. Full control over all states and records
+3. Faster implementation
+4. Can migrate to HTTP later if decoupling becomes important
+
+**Consider HTTP API** when:
+- Running Temporal workers in a different environment than Airflow
+- Need language-agnostic integration
+- Want stronger API contract guarantees
+- Airflow team accepts the REST API changes upstream
+
+---
+
 ## Conclusion
 
 Deep Integration mode provides the best of both worlds:
@@ -974,5 +1168,7 @@ Deep Integration mode provides the best of both worlds:
 The key architectural insight is separating concerns:
 - **Airflow**: User interface, configuration storage, status display
 - **Temporal**: Execution engine, durability, retry management
+
+**Implementation approach**: Direct database access with `run_type='external'` requires only ~7 lines of Airflow changes, while HTTP API approach (~70 lines) is documented for future consideration.
 
 This separation allows teams to leverage Temporal's superior execution guarantees while maintaining the Airflow experience their users expect.
