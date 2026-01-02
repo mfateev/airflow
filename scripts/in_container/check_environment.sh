@@ -189,6 +189,10 @@ if [[ ${INTEGRATION_DRILL} == "true" ]]; then
     check_service "drill" "run_nc drill 8047" 50
 fi
 
+if [[ ${INTEGRATION_TEMPORAL} == "true" ]]; then
+    check_service "temporal" "run_nc temporal 7233" 50
+fi
+
 if [[ ${INTEGRATION_YDB} == "true" ]]; then
     check_service "YDB Cluster" "run_nc ydb 2136" 50
 fi

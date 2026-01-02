@@ -52,6 +52,7 @@ from airflow_breeze.global_constants import (
     DRILL_HOST_PORT,
     EDGE_EXECUTOR,
     FAB_AUTH_MANAGER,
+    TEMPORAL_HOST_PORT,
     FLOWER_HOST_PORT,
     GREMLIN_HOST_PORT,
     KEYCLOAK_INTEGRATION,
@@ -621,6 +622,7 @@ class ShellParams:
         _set_var(_env, "DOWNGRADE_SQLALCHEMY", self.downgrade_sqlalchemy)
         _set_var(_env, "DOWNGRADE_PENDULUM", self.downgrade_pendulum)
         _set_var(_env, "DRILL_HOST_PORT", None, DRILL_HOST_PORT)
+        _set_var(_env, "TEMPORAL_HOST_PORT", None, TEMPORAL_HOST_PORT)
         _set_var(_env, "ENABLE_COVERAGE", self.enable_coverage)
         _set_var(_env, "FLOWER_HOST_PORT", None, FLOWER_HOST_PORT)
         _set_var(_env, "GREMLIN_HOST_PORT", None, GREMLIN_HOST_PORT)
