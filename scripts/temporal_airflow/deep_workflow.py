@@ -11,10 +11,17 @@ from temporalio.exceptions import ApplicationError, ActivityError
 # Pass through Airflow imports to avoid sandbox reloading issues
 with workflow.unsafe.imports_passed_through():
     import pendulum  # Must be imported first to avoid metaclass conflicts
-    from airflow.models.dagrun import DagRunState
-    from airflow.models.taskinstance import TaskInstanceState
+    from airflow.models.dagrun import DagRun, DagRunState
+    from airflow.models.dag_version import DagVersion
+    from airflow.models.taskinstance import TaskInstance, TaskInstanceState
+    from airflow.models.trigger import Trigger  # Required for Callback foreign key
     from airflow.serialization.serialized_objects import SerializedDAG
+    from airflow._shared.timezones import timezone as airflow_timezone
     from airflow.utils.time_provider import set_time_provider, clear_time_provider
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.orm import sessionmaker
+    from airflow.models import Base
 
 from temporal_airflow.models import (
     DeepDagExecutionInput,
@@ -44,23 +51,31 @@ class ExecuteAirflowDagDeepWorkflow:
     """
     Temporal workflow for deep integration mode.
 
-    Unlike the standalone workflow, this workflow:
-    - Uses real Airflow DB (not in-memory SQLite)
-    - Creates DagRun/TaskInstance records via activities
-    - Syncs status back to Airflow DB for UI visibility
-    - Reads connections/variables from Airflow DB via hooks
-    - Loads serialized DAG from Airflow DB
+    Design: Same as standalone workflow + sync activities.
 
-    This enables full Airflow UI integration while letting
-    Temporal drive the execution.
+    SAME as standalone workflow:
+    - Uses in-workflow database (in-memory SQLite)
+    - Uses Airflow's native scheduling logic (update_state, TriggerRuleDep)
+    - Creates real DagRun/TaskInstance models in workflow DB
+
+    ADDED for deep integration:
+    - Loads DAG from real Airflow DB (via activity)
+    - Syncs status to real Airflow DB (via activities)
+    - Connections/variables read from real DB by hooks
     """
 
     def __init__(self):
         """Initialize workflow state."""
+        # In-workflow database (same as standalone)
+        self.engine = None
+        self.sessionFactory = None
+
+        # DAG state
+        self.dag = None
+        self.dag_fileloc: str | None = None
+
         # Deep integration state
         self.run_id: str | None = None
-        self.dag: Any = None  # SerializedDAG
-        self.dag_fileloc: str | None = None  # DAG file location from SerializedDagModel
 
         # XCom state in workflow (for passing to activities)
         self.xcom_store: dict[tuple, Any] = {}  # ti_key -> xcom_data
@@ -68,6 +83,102 @@ class ExecuteAirflowDagDeepWorkflow:
         # Task tracking
         self.tasks_succeeded: int = 0
         self.tasks_failed: int = 0
+
+    def _initialize_database(self):
+        """
+        Initialize workflow-specific in-memory database.
+
+        SAME AS STANDALONE: Each workflow gets unique in-memory DB.
+        """
+        workflow_id = workflow.info().workflow_id
+        conn_str = f"sqlite:///file:memdb_{workflow_id}?mode=memory&cache=shared&uri=true"
+
+        # Create workflow-specific engine (no global state!)
+        self.engine = create_engine(
+            conn_str,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+
+        # Create workflow-specific session factory
+        self.sessionFactory = sessionmaker(
+            bind=self.engine,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+        )
+
+        # Create schema
+        Base.metadata.create_all(self.engine)
+
+        workflow.logger.info(f"Database initialized for workflow {workflow_id}")
+
+    def _create_local_dag_run(
+        self,
+        dag_id: str,
+        run_id: str,
+        logical_date: datetime,
+        conf: dict | None,
+    ) -> int:
+        """
+        Create DagRun and TaskInstances in IN-WORKFLOW database.
+
+        SAME AS STANDALONE: Uses workflow-specific SessionFactory.
+        This enables Airflow's native scheduling logic to work.
+        """
+        session = self.sessionFactory()
+        try:
+            # Create DagVersion for this execution
+            dag_version = DagVersion(
+                dag_id=dag_id,
+                version_number=1,
+            )
+            session.add(dag_version)
+            session.flush()
+
+            # Create DagRun
+            dag_run = DagRun(
+                dag_id=dag_id,
+                run_id=run_id,
+                logical_date=logical_date,
+                run_type="manual",
+                state=DagRunState.RUNNING,
+                conf=conf,
+            )
+            dag_run.dag = self.dag  # Set DAG reference (required for update_state)
+            dag_run.created_dag_version = dag_version  # Link to version
+
+            session.add(dag_run)
+            session.flush()
+
+            # Create TaskInstances using Airflow's native method
+            dag_run.verify_integrity(session=session, dag_version_id=dag_version.id)
+
+            session.commit()
+
+            workflow.logger.info(
+                f"Created local DagRun: {dag_run.id} with {len(dag_run.task_instances)} tasks"
+            )
+            return dag_run.id
+        finally:
+            session.close()
+
+    def _get_upstream_xcom(self, ti: TaskInstance, task) -> dict[str, Any] | None:
+        """
+        Gather XCom values from upstream tasks.
+
+        SAME AS STANDALONE: XCom stored in workflow state.
+        """
+        if not task.upstream_task_ids:
+            return None
+
+        upstream_results = {}
+        for upstream_task_id in task.upstream_task_ids:
+            upstream_key = (ti.dag_id, upstream_task_id, ti.run_id, ti.map_index)
+            if upstream_key in self.xcom_store:
+                upstream_results[upstream_task_id] = self.xcom_store[upstream_key]
+
+        return upstream_results if upstream_results else None
 
     @workflow.run
     async def run(self, input: DeepDagExecutionInput) -> DagExecutionResult:
@@ -91,36 +202,10 @@ class ExecuteAirflowDagDeepWorkflow:
         start_time = workflow.now()
 
         try:
-            # Phase 1: Create or use existing DagRun record
-            if input.run_id:
-                # DagRun already exists (e.g., created by orchestrator)
-                self.run_id = input.run_id
-                workflow.logger.info(f"Using existing DagRun: {self.run_id}")
+            # Phase 1: Initialize IN-WORKFLOW database (same as standalone)
+            self._initialize_database()
 
-                # Ensure TaskInstances exist
-                await workflow.execute_activity(
-                    ensure_task_instances,
-                    EnsureTaskInstancesInput(
-                        dag_id=input.dag_id,
-                        run_id=self.run_id,
-                    ),
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
-            else:
-                # Create new DagRun in Airflow DB
-                result = await workflow.execute_activity(
-                    create_dagrun_record,
-                    CreateDagRunInput(
-                        dag_id=input.dag_id,
-                        logical_date=input.logical_date,
-                        conf=input.conf,
-                    ),
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
-                self.run_id = result.run_id
-                workflow.logger.info(f"Created DagRun: {self.run_id}")
-
-            # Phase 2: Load serialized DAG from Airflow DB
+            # Phase 2: Load serialized DAG from REAL Airflow DB (deep integration)
             dag_result = await workflow.execute_activity(
                 load_serialized_dag,
                 LoadSerializedDagInput(dag_id=input.dag_id),
@@ -133,12 +218,50 @@ class ExecuteAirflowDagDeepWorkflow:
                 f"(fileloc={self.dag_fileloc})"
             )
 
-            # Phase 3: Execute scheduling loop with status sync
-            final_state = await self._scheduling_loop(input.dag_id)
+            # Phase 3: Create/verify DagRun in REAL Airflow DB (deep integration)
+            if input.run_id:
+                # DagRun already exists (e.g., created by orchestrator)
+                self.run_id = input.run_id
+                workflow.logger.info(f"Using existing DagRun: {self.run_id}")
+
+                # Ensure TaskInstances exist in real DB
+                await workflow.execute_activity(
+                    ensure_task_instances,
+                    EnsureTaskInstancesInput(
+                        dag_id=input.dag_id,
+                        run_id=self.run_id,
+                    ),
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            else:
+                # Create new DagRun in real Airflow DB
+                result = await workflow.execute_activity(
+                    create_dagrun_record,
+                    CreateDagRunInput(
+                        dag_id=input.dag_id,
+                        logical_date=input.logical_date,
+                        conf=input.conf,
+                    ),
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+                self.run_id = result.run_id
+                workflow.logger.info(f"Created DagRun in real DB: {self.run_id}")
+
+            # Phase 4: Create DagRun in IN-WORKFLOW database (same as standalone)
+            # This enables Airflow's native scheduling logic (update_state, TriggerRuleDep)
+            dag_run_id = self._create_local_dag_run(
+                dag_id=input.dag_id,
+                run_id=self.run_id,
+                logical_date=input.logical_date,
+                conf=input.conf,
+            )
+
+            # Phase 5: Execute scheduling loop with native Airflow logic + sync
+            final_state = await self._scheduling_loop(dag_run_id)
 
             end_time = workflow.now()
 
-            # Phase 4: Sync final state to Airflow DB
+            # Phase 6: Sync final state to REAL Airflow DB (deep integration)
             await workflow.execute_activity(
                 sync_dagrun_status,
                 DagRunStatusSync(
@@ -181,169 +304,164 @@ class ExecuteAirflowDagDeepWorkflow:
         finally:
             clear_time_provider()
 
-    def _get_upstream_xcom(self, task_id: str, dag_id: str, run_id: str, map_index: int) -> dict[str, Any] | None:
+    async def _handle_activity_result(self, ti_key: tuple, result: TaskExecutionResult):
         """
-        Gather XCom values from upstream tasks.
+        Update TaskInstance in IN-WORKFLOW DB based on activity result.
 
-        XCom is stored in workflow state and passed to activities.
+        SAME AS STANDALONE + sync to real Airflow DB.
         """
-        task = self.dag.get_task(task_id)
-        if not task.upstream_task_ids:
-            return None
+        session = self.sessionFactory()
+        try:
+            ti = session.query(TaskInstance).filter(
+                TaskInstance.dag_id == ti_key[0],
+                TaskInstance.task_id == ti_key[1],
+                TaskInstance.run_id == ti_key[2],
+                TaskInstance.map_index == ti_key[3],
+            ).one()
 
-        upstream_results = {}
-        for upstream_task_id in task.upstream_task_ids:
-            upstream_key = (dag_id, upstream_task_id, run_id, map_index)
-            if upstream_key in self.xcom_store:
-                upstream_results[upstream_task_id] = self.xcom_store[upstream_key]
+            # Update in in-workflow DB (same as standalone)
+            ti.state = result.state
+            ti.start_date = result.start_date
+            ti.end_date = result.end_date
 
-        return upstream_results if upstream_results else None
+            session.commit()
 
-    async def _scheduling_loop(self, dag_id: str) -> str:
+            workflow.logger.info(
+                f"Updated task {ti_key} to state {ti.state} "
+                f"(duration: {result.end_date - result.start_date})"
+            )
+        finally:
+            session.close()
+
+        # DEEP INTEGRATION: Sync to real Airflow DB
+        await workflow.execute_activity(
+            sync_task_status,
+            TaskStatusSync(
+                dag_id=ti_key[0],
+                task_id=ti_key[1],
+                run_id=self.run_id,
+                map_index=ti_key[3],
+                state=result.state.value,
+                start_date=result.start_date,
+                end_date=result.end_date,
+                xcom_value=result.return_value if hasattr(result, 'return_value') else None,
+            ),
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+
+    async def _scheduling_loop(self, dag_run_id: int) -> str:
         """
-        Main scheduling loop for deep integration.
+        Main scheduling loop using Airflow's native logic.
 
-        Unlike the standalone workflow, this:
-        - Doesn't maintain local DB state
-        - Syncs task status to Airflow DB after each completion
-        - Uses topological order from SerializedDAG
+        SAME AS STANDALONE: Uses dag_run.update_state() which internally
+        calls TriggerRuleDep for trigger rule evaluation.
+
+        DEEP INTEGRATION ADDITION: Syncs state to real Airflow DB.
 
         Returns:
             Final DAG run state ("success" or "failed")
         """
-        # Get topological order of tasks from DAG
-        task_ids = list(self.dag.task_dict.keys())
-        workflow.logger.info(f"Tasks to execute: {task_ids}")
-
-        # Track state: task_id -> state
-        task_states: dict[str, TaskInstanceState] = {
-            task_id: TaskInstanceState.SCHEDULED for task_id in task_ids
-        }
-
-        # Track running activities: task_id -> ActivityHandle
-        running_activities: dict[str, Any] = {}
+        # Track running activities: ti_key -> ActivityHandle
+        running_activities: dict[tuple, Any] = {}
+        final_state: str | None = None
 
         max_iterations = 100
+
         for iteration in range(max_iterations):
             workflow.logger.info(
                 f"Scheduling loop iteration {iteration + 1}: "
-                f"{len(running_activities)} running, "
-                f"succeeded={self.tasks_succeeded}, failed={self.tasks_failed}"
+                f"{len(running_activities)} activities running"
             )
 
-            # Check if all tasks are complete
-            incomplete_tasks = [
-                tid for tid, state in task_states.items()
-                if state not in (TaskInstanceState.SUCCESS, TaskInstanceState.FAILED, TaskInstanceState.SKIPPED)
-            ]
+            session = self.sessionFactory()
+            try:
+                dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
+                dag_run.dag = self.dag  # Restore DAG reference
 
-            if not incomplete_tasks:
-                workflow.logger.info("All tasks complete")
-                # Determine final state
-                if self.tasks_failed > 0:
-                    return "failed"
-                return "success"
+                # Check if complete
+                if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
+                    workflow.logger.info(f"DAG completed: {dag_run.state}")
+                    final_state = dag_run.state.value if hasattr(dag_run.state, 'value') else str(dag_run.state)
+                    break
 
-            # Find tasks that are ready to run (dependencies satisfied)
-            ready_tasks = []
-            for task_id in incomplete_tasks:
-                if task_id in running_activities:
-                    continue  # Already running
-
-                task = self.dag.get_task(task_id)
-
-                # Check if upstream tasks are complete
-                upstream_complete = True
-                upstream_failed = False
-                for upstream_id in task.upstream_task_ids:
-                    upstream_state = task_states.get(upstream_id)
-                    if upstream_state not in (TaskInstanceState.SUCCESS, TaskInstanceState.FAILED, TaskInstanceState.SKIPPED):
-                        upstream_complete = False
-                        break
-                    if upstream_state == TaskInstanceState.FAILED:
-                        upstream_failed = True
-
-                if not upstream_complete:
-                    continue
-
-                # If upstream failed and trigger_rule is "all_success" (default), skip this task
-                trigger_rule = getattr(task, 'trigger_rule', 'all_success')
-                if upstream_failed and trigger_rule == 'all_success':
-                    workflow.logger.info(f"Skipping {task_id} due to upstream failure")
-                    task_states[task_id] = TaskInstanceState.SKIPPED
-
-                    # Sync skip status to Airflow DB
-                    await workflow.execute_activity(
-                        sync_task_status,
-                        TaskStatusSync(
-                            dag_id=dag_id,
-                            task_id=task_id,
-                            run_id=self.run_id,
-                            map_index=-1,
-                            state=TaskInstanceState.SKIPPED.value,
-                            end_date=workflow.now(),
-                        ),
-                        start_to_close_timeout=timedelta(seconds=30),
-                    )
-                    continue
-
-                ready_tasks.append(task_id)
-
-            # Start activities for ready tasks
-            for task_id in ready_tasks:
-                task_states[task_id] = TaskInstanceState.RUNNING
-
-                # Sync running status to Airflow DB
-                await workflow.execute_activity(
-                    sync_task_status,
-                    TaskStatusSync(
-                        dag_id=dag_id,
-                        task_id=task_id,
-                        run_id=self.run_id,
-                        map_index=-1,
-                        state=TaskInstanceState.RUNNING.value,
-                        start_date=workflow.now(),
-                    ),
-                    start_to_close_timeout=timedelta(seconds=30),
+                # CRITICAL: Use Airflow's native update_state() method
+                # This internally uses TriggerRuleDep to evaluate trigger rules!
+                schedulable_tis, callback = dag_run.update_state(
+                    session=session,
+                    execute_callbacks=False,
                 )
 
-                # Gather upstream XCom
-                upstream_results = self._get_upstream_xcom(task_id, dag_id, self.run_id, -1)
+                # Commit state changes
+                session.commit()
 
-                activity_queue = workflow.info().task_queue
+                # Start activities for new schedulable tasks
+                if schedulable_tis:
+                    dag_run.schedule_tis(schedulable_tis, session=session)
+                    session.commit()
 
-                workflow.logger.info(
-                    f"Starting activity for {task_id} on queue '{activity_queue}'"
-                )
+                    for ti in schedulable_tis:
+                        ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
 
-                # Deep integration: No connections/variables passed
-                # Activities read from Airflow DB via hooks
-                handle = workflow.start_activity(
-                    run_airflow_task,
-                    arg=ActivityTaskInput(
-                        dag_id=dag_id,
-                        task_id=task_id,
-                        run_id=self.run_id,
-                        logical_date=workflow.now(),  # Use workflow time
-                        try_number=1,
-                        map_index=-1,
-                        dag_rel_path=self.dag_fileloc,  # From SerializedDagModel.fileloc
-                        upstream_results=upstream_results,
-                        # Deep integration: connections/variables from Airflow DB
-                        connections=None,
-                        variables=None,
-                    ),
-                    task_queue=activity_queue,
-                    start_to_close_timeout=timedelta(hours=2),
-                    heartbeat_timeout=timedelta(minutes=5),
-                )
+                        # DEEP INTEGRATION: Sync QUEUED state to real Airflow DB
+                        await workflow.execute_activity(
+                            sync_task_status,
+                            TaskStatusSync(
+                                dag_id=ti.dag_id,
+                                task_id=ti.task_id,
+                                run_id=self.run_id,
+                                map_index=ti.map_index,
+                                state=ti.state.value,
+                                start_date=workflow.now(),
+                            ),
+                            start_to_close_timeout=timedelta(seconds=30),
+                        )
 
-                running_activities[task_id] = handle
+                        # Gather upstream XCom
+                        task = self.dag.get_task(ti.task_id)
+                        upstream_results = self._get_upstream_xcom(ti, task)
+
+                        activity_queue = workflow.info().task_queue
+
+                        workflow.logger.info(
+                            f"Starting activity for {ti_key} on queue '{activity_queue}' "
+                            f"(dag_fileloc={self.dag_fileloc})"
+                        )
+
+                        # Deep integration: No connections/variables passed
+                        # Activities read from real Airflow DB via hooks
+                        handle = workflow.start_activity(
+                            run_airflow_task,
+                            arg=ActivityTaskInput(
+                                dag_id=ti.dag_id,
+                                task_id=ti.task_id,
+                                run_id=ti.run_id,
+                                logical_date=dag_run.logical_date,
+                                try_number=ti.try_number,
+                                map_index=ti.map_index,
+                                dag_rel_path=self.dag_fileloc,
+                                upstream_results=upstream_results,
+                                queue=ti.queue,
+                                pool_slots=ti.pool_slots,
+                                # Deep integration: connections/variables from Airflow DB
+                                connections=None,
+                                variables=None,
+                            ),
+                            task_queue=activity_queue,
+                            start_to_close_timeout=timedelta(hours=2),
+                            heartbeat_timeout=timedelta(minutes=5),
+                        )
+
+                        running_activities[ti_key] = handle
+
+                        workflow.logger.info(f"Activity handle created for {ti_key}")
+
+            finally:
+                session.close()
 
             # Wait for any activities to complete
             if running_activities:
                 workflow.logger.info(
-                    f"Waiting for {len(running_activities)} activities..."
+                    f"Waiting for {len(running_activities)} activities to complete..."
                 )
 
                 done, pending = await asyncio.wait(
@@ -352,80 +470,71 @@ class ExecuteAirflowDagDeepWorkflow:
                     return_when=asyncio.FIRST_COMPLETED
                 )
 
+                workflow.logger.info(
+                    f"Activity wait completed: {len(done)} done, {len(pending)} pending"
+                )
+
                 # Process completed activities
                 for completed in done:
-                    task_id = next(k for k, v in running_activities.items() if v == completed)
-                    ti_key = (dag_id, task_id, self.run_id, -1)
+                    ti_key = next(k for k, v in running_activities.items() if v == completed)
+
+                    workflow.logger.info(f"Processing completed activity for {ti_key}")
 
                     try:
                         result: TaskExecutionResult = completed.result()
-
                         workflow.logger.info(
-                            f"Activity completed for {task_id}: state={result.state}"
+                            f"Activity completed for {ti_key}: state={result.state}"
                         )
 
-                        # Update local state
-                        task_states[task_id] = result.state
+                        # Store XCom in workflow state
+                        if result.xcom_data:
+                            self.xcom_store[ti_key] = result.xcom_data
 
+                        # Update task counts
                         if result.state == TaskInstanceState.SUCCESS:
                             self.tasks_succeeded += 1
                         elif result.state == TaskInstanceState.FAILED:
                             self.tasks_failed += 1
 
-                        # Store XCom
-                        if result.xcom_data:
-                            self.xcom_store[ti_key] = result.xcom_data
-
-                        # Sync status to Airflow DB
-                        await workflow.execute_activity(
-                            sync_task_status,
-                            TaskStatusSync(
-                                dag_id=dag_id,
-                                task_id=task_id,
-                                run_id=self.run_id,
-                                map_index=-1,
-                                state=result.state.value,
-                                start_date=result.start_date,
-                                end_date=result.end_date,
-                                xcom_value=result.return_value,
-                            ),
-                            start_to_close_timeout=timedelta(seconds=30),
-                        )
+                        # Update in-workflow DB + sync to real Airflow DB
+                        await self._handle_activity_result(ti_key, result)
 
                     except ActivityError as e:
                         workflow.logger.error(
-                            f"ActivityError for {task_id}: {e.message}"
+                            f"ActivityError caught for {ti_key}: {e.message}, cause type: {type(e.cause)}"
                         )
 
-                        task_states[task_id] = TaskInstanceState.FAILED
                         self.tasks_failed += 1
 
-                        # Sync failure to Airflow DB
-                        await workflow.execute_activity(
-                            sync_task_status,
-                            TaskStatusSync(
-                                dag_id=dag_id,
-                                task_id=task_id,
-                                run_id=self.run_id,
-                                map_index=-1,
-                                state=TaskInstanceState.FAILED.value,
-                                end_date=workflow.now(),
-                            ),
-                            start_to_close_timeout=timedelta(seconds=30),
+                        # Create failed result
+                        failed_result = TaskExecutionResult(
+                            dag_id=ti_key[0],
+                            task_id=ti_key[1],
+                            run_id=ti_key[2],
+                            try_number=1,
+                            state=TaskInstanceState.FAILED,
+                            start_date=workflow.now(),
+                            end_date=workflow.now(),
+                            error_message=str(e.message),
                         )
+
+                        await self._handle_activity_result(ti_key, failed_result)
 
                     except Exception as e:
                         workflow.logger.error(
-                            f"Unexpected error for {task_id}: {type(e).__name__}: {e}"
+                            f"Unexpected error for {ti_key}: {type(e).__name__}: {e}"
                         )
-                        task_states[task_id] = TaskInstanceState.FAILED
                         self.tasks_failed += 1
 
-                    del running_activities[task_id]
+                    del running_activities[ti_key]
 
             else:
                 # No running activities, sleep before checking for new work
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
+
+        # Check if we broke out of loop due to completion
+        if final_state:
+            return final_state
 
         workflow.logger.error("Max iterations reached!")
         return "failed"

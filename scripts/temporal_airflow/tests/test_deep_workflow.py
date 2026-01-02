@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tests for deep integration workflow."""
+"""Tests for deep integration workflow with in-workflow database."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -47,12 +47,29 @@ class TestDeepWorkflowStructure:
     def test_workflow_initial_state(self):
         """Workflow should have correct initial state."""
         workflow = ExecuteAirflowDagDeepWorkflow()
-        assert workflow.run_id is None
+        # In-workflow database state (same as standalone)
+        assert workflow.engine is None
+        assert workflow.sessionFactory is None
+        # DAG state
         assert workflow.dag is None
         assert workflow.dag_fileloc is None
+        # Deep integration state
+        assert workflow.run_id is None
+        # XCom state
         assert workflow.xcom_store == {}
+        # Task tracking
         assert workflow.tasks_succeeded == 0
         assert workflow.tasks_failed == 0
+
+    def test_workflow_has_database_methods(self):
+        """Deep workflow should have in-workflow database methods (same as standalone)."""
+        workflow = ExecuteAirflowDagDeepWorkflow()
+        # Should have in-memory DB methods
+        assert hasattr(workflow, "_initialize_database")
+        assert hasattr(workflow, "_create_local_dag_run")
+        assert hasattr(workflow, "_get_upstream_xcom")
+        assert hasattr(workflow, "_handle_activity_result")
+        assert hasattr(workflow, "_scheduling_loop")
 
 
 class TestDeepDagExecutionInput:
@@ -96,15 +113,17 @@ class TestGetUpstreamXcom:
         """Should return None if no upstream tasks."""
         workflow = ExecuteAirflowDagDeepWorkflow()
 
-        # Create mock DAG with task that has no upstream
+        # Create mock task with no upstream
         mock_task = MagicMock()
         mock_task.upstream_task_ids = []
 
-        mock_dag = MagicMock()
-        mock_dag.get_task.return_value = mock_task
-        workflow.dag = mock_dag
+        # Create mock TaskInstance
+        mock_ti = MagicMock()
+        mock_ti.dag_id = "dag1"
+        mock_ti.run_id = "run1"
+        mock_ti.map_index = -1
 
-        result = workflow._get_upstream_xcom("task1", "dag1", "run1", -1)
+        result = workflow._get_upstream_xcom(mock_ti, mock_task)
         assert result is None
 
     def test_with_upstream_xcom(self):
@@ -114,15 +133,17 @@ class TestGetUpstreamXcom:
         # Store XCom for upstream task
         workflow.xcom_store[("dag1", "upstream_task", "run1", -1)] = {"result": 42}
 
-        # Create mock DAG
+        # Create mock task with upstream
         mock_task = MagicMock()
         mock_task.upstream_task_ids = ["upstream_task"]
 
-        mock_dag = MagicMock()
-        mock_dag.get_task.return_value = mock_task
-        workflow.dag = mock_dag
+        # Create mock TaskInstance
+        mock_ti = MagicMock()
+        mock_ti.dag_id = "dag1"
+        mock_ti.run_id = "run1"
+        mock_ti.map_index = -1
 
-        result = workflow._get_upstream_xcom("task1", "dag1", "run1", -1)
+        result = workflow._get_upstream_xcom(mock_ti, mock_task)
         assert result == {"upstream_task": {"result": 42}}
 
     def test_upstream_not_in_store(self):
@@ -132,11 +153,12 @@ class TestGetUpstreamXcom:
         mock_task = MagicMock()
         mock_task.upstream_task_ids = ["upstream_task"]
 
-        mock_dag = MagicMock()
-        mock_dag.get_task.return_value = mock_task
-        workflow.dag = mock_dag
+        mock_ti = MagicMock()
+        mock_ti.dag_id = "dag1"
+        mock_ti.run_id = "run1"
+        mock_ti.map_index = -1
 
-        result = workflow._get_upstream_xcom("task1", "dag1", "run1", -1)
+        result = workflow._get_upstream_xcom(mock_ti, mock_task)
         assert result is None
 
 
@@ -243,33 +265,73 @@ class TestWorkflowAttributes:
         assert defn.sandboxed is False
 
 
-class TestDifferenceFromStandalone:
-    """Tests to verify differences from standalone workflow."""
+class TestSameAsStandalone:
+    """Tests to verify deep workflow follows standalone pattern."""
 
-    def test_no_database_initialization(self):
-        """Deep workflow should not have _initialize_database method."""
+    def test_has_in_workflow_database(self):
+        """Deep workflow should have in-workflow database (same as standalone)."""
         workflow = ExecuteAirflowDagDeepWorkflow()
-        # Should not have in-memory DB methods
-        assert not hasattr(workflow, "_initialize_database")
-        assert not hasattr(workflow, "engine")
-        assert not hasattr(workflow, "sessionFactory")
+        # Should have attributes for in-memory DB
+        assert hasattr(workflow, "engine")
+        assert hasattr(workflow, "sessionFactory")
+        # Initially None until _initialize_database is called
+        assert workflow.engine is None
+        assert workflow.sessionFactory is None
 
-    def test_uses_external_db_via_activities(self):
-        """Deep workflow should rely on activities for DB access."""
+    def test_has_initialize_database_method(self):
+        """Deep workflow should have _initialize_database method."""
+        workflow = ExecuteAirflowDagDeepWorkflow()
+        assert hasattr(workflow, "_initialize_database")
+        assert callable(workflow._initialize_database)
+
+    def test_has_create_local_dag_run_method(self):
+        """Deep workflow should have _create_local_dag_run method."""
+        workflow = ExecuteAirflowDagDeepWorkflow()
+        assert hasattr(workflow, "_create_local_dag_run")
+        assert callable(workflow._create_local_dag_run)
+
+    def test_uses_sync_activities_for_real_db(self):
+        """Deep workflow should use sync activities for real Airflow DB."""
         # Verify the workflow imports sync activities
         from temporal_airflow.deep_workflow import (
             create_dagrun_record,
             sync_task_status,
             sync_dagrun_status,
+            load_serialized_dag,
+            ensure_task_instances,
         )
 
         assert create_dagrun_record is not None
         assert sync_task_status is not None
         assert sync_dagrun_status is not None
+        assert load_serialized_dag is not None
+        assert ensure_task_instances is not None
 
     def test_no_connections_variables_fields(self):
-        """Deep workflow should not pass connections/variables to activities."""
+        """Deep workflow should not have connections/variables fields."""
         workflow = ExecuteAirflowDagDeepWorkflow()
         # Deep integration reads from Airflow DB via hooks
+        # (unlike standalone which passes them in workflow input)
         assert not hasattr(workflow, "connections")
         assert not hasattr(workflow, "variables")
+
+
+class TestDesignPrinciple:
+    """Tests to verify design principle: same as standalone + sync activities."""
+
+    def test_docstring_mentions_design(self):
+        """Workflow docstring should mention it follows standalone pattern."""
+        docstring = ExecuteAirflowDagDeepWorkflow.__doc__
+        assert "standalone" in docstring.lower() or "SAME" in docstring
+
+    def test_scheduling_loop_uses_native_logic(self):
+        """Scheduling loop should be designed to use Airflow's native logic."""
+        # Verify the workflow has a _scheduling_loop method that takes dag_run_id
+        workflow = ExecuteAirflowDagDeepWorkflow()
+        assert hasattr(workflow, "_scheduling_loop")
+
+        # Check method signature accepts dag_run_id (indicating in-workflow DB pattern)
+        import inspect
+        sig = inspect.signature(workflow._scheduling_loop)
+        params = list(sig.parameters.keys())
+        assert "dag_run_id" in params
