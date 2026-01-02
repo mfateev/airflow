@@ -21,11 +21,27 @@
 
 ### What Deep Integration Adds
 
-The standalone workflow uses an **in-memory SQLite database** per workflow. Deep integration changes this to:
+The standalone workflow uses an **in-memory SQLite database** per workflow. Deep integration **keeps this design** and adds:
 
-1. **Write to Airflow DB** - So UI shows real-time status
-2. **Read config from Airflow DB** - Connections, variables, pools
-3. **Orchestrator-triggered** - Works with existing UI/API/CLI
+1. **In-workflow database preserved** - Same as standalone, uses Airflow's native scheduling logic
+2. **Sync activities added** - Write state from in-workflow DB to real Airflow DB for UI visibility
+3. **Load DAG from real DB** - Via activity, instead of passing in workflow input
+4. **Connections read from real DB** - Hooks read from Airflow DB during task execution
+5. **Orchestrator-triggered** - Works with existing UI/API/CLI
+
+### Key Design Principle: Reuse Airflow's Native Logic
+
+Both standalone and deep integration workflows use the **same scheduling logic**:
+
+```python
+# Same code in both workflows - uses Airflow's native trigger rule evaluation
+dag_run.update_state(session=session)  # ← Internally calls TriggerRuleDep!
+```
+
+This ensures:
+- **Correctness**: Identical behavior to built-in Airflow scheduler
+- **Maintainability**: No custom trigger rule code to maintain
+- **Consistency**: Both modes use the same workflow code path
 
 ---
 
@@ -141,9 +157,9 @@ async def sync_dagrun_status(input: DagRunStatusSync) -> None:
 
 ### Phase 2: Deep Integration Workflow
 
-**Goal**: Create a separate workflow for deep integration that uses real Airflow DB.
+**Goal**: Create a workflow that uses **same in-workflow database as standalone** plus sync activities.
 
-#### 2.1 Create New Workflow File
+#### 2.1 Architecture: Same as Standalone + Sync Activities
 
 ```python
 # scripts/temporal_airflow/deep_workflow.py
@@ -153,56 +169,67 @@ class ExecuteAirflowDagDeepWorkflow:
     """
     Temporal workflow for deep integration mode.
 
-    Unlike the standalone workflow, this:
-    - Uses real Airflow DB (not in-memory SQLite)
-    - Creates DagRun/TaskInstance via activities
-    - Syncs status back to Airflow DB for UI visibility
-    - Reads connections/variables from Airflow DB
+    SAME as standalone workflow:
+    - Uses in-workflow database (in-memory SQLite)
+    - Uses Airflow's native scheduling logic (update_state, TriggerRuleDep)
+    - Creates real DagRun/TaskInstance models in workflow DB
+
+    ADDED for deep integration:
+    - Loads DAG from real Airflow DB (via activity)
+    - Syncs status to real Airflow DB (via activities)
+    - Connections/variables read from real DB by hooks
     """
+
+    def __init__(self):
+        # SAME AS STANDALONE: In-workflow database state
+        self.engine = None
+        self.sessionFactory = None
+        self.dag = None
+        self.xcom_store: dict[tuple, Any] = {}
+
+    def _initialize_database(self):
+        """SAME AS STANDALONE: Initialize in-memory SQLite database."""
+        workflow_id = workflow.info().workflow_id
+        conn_str = f"sqlite:///file:memdb_{workflow_id}?mode=memory&cache=shared&uri=true"
+        self.engine = create_engine(conn_str, poolclass=StaticPool, ...)
+        self.sessionFactory = sessionmaker(bind=self.engine, ...)
+        Base.metadata.create_all(self.engine)
 
     @workflow.run
     async def run(self, input: DeepDagExecutionInput) -> DagExecutionResult:
         set_time_provider(workflow.now)
 
         try:
-            # Create or verify DagRun in Airflow DB
-            if not input.run_id:
-                result = await workflow.execute_activity(
-                    create_dagrun_record,
-                    CreateDagRunInput(
-                        dag_id=input.dag_id,
-                        logical_date=input.logical_date,
-                        conf=input.conf,
-                    ),
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
-                self.run_id = result.run_id
-            else:
-                # DagRun already exists (orchestrator created it)
-                self.run_id = input.run_id
+            # 1. SAME AS STANDALONE: Initialize in-workflow database
+            self._initialize_database()
 
-            # Load serialized DAG from Airflow DB
+            # 2. DEEP INTEGRATION: Load DAG from real Airflow DB
             dag_data = await workflow.execute_activity(
                 load_serialized_dag,
                 LoadSerializedDagInput(dag_id=input.dag_id),
-                start_to_close_timeout=timedelta(seconds=30),
             )
-            self.dag = SerializedDAG.from_dict(dag_data)
+            self.dag = SerializedDAG.from_dict(dag_data.dag_data)
+            self.dag_fileloc = dag_data.fileloc
 
-            # Execute scheduling loop with status sync
-            final_state = await self._scheduling_loop()
+            # 3. DEEP INTEGRATION: Create/verify DagRun in real Airflow DB
+            if not input.run_id:
+                result = await workflow.execute_activity(create_dagrun_record, ...)
+                self.run_id = result.run_id
+            else:
+                self.run_id = input.run_id
 
-            # Sync final state
-            await workflow.execute_activity(
-                sync_dagrun_status,
-                DagRunStatusSync(
-                    dag_id=input.dag_id,
-                    run_id=self.run_id,
-                    state=final_state,
-                    end_date=workflow.now(),
-                ),
-                start_to_close_timeout=timedelta(seconds=30),
-            )
+            # 4. SAME AS STANDALONE: Create DagRun in in-workflow database
+            dag_run_id = self._create_local_dag_run(...)
+
+            # 5. DEEP INTEGRATION: Ensure TaskInstances in real Airflow DB
+            await workflow.execute_activity(ensure_task_instances, ...)
+
+            # 6. SAME AS STANDALONE: Scheduling loop with Airflow's native logic
+            #    (uses update_state() which calls TriggerRuleDep)
+            final_state = await self._scheduling_loop(dag_run_id)
+
+            # 7. DEEP INTEGRATION: Sync final state to real Airflow DB
+            await workflow.execute_activity(sync_dagrun_status, ...)
 
             return DagExecutionResult(state=final_state, ...)
         finally:
@@ -585,26 +612,25 @@ The following gaps exist in the current implementation and should be addressed i
 - Workflow stores `self.dag_fileloc` and passes it to activities
 - Activities now receive the correct file path regardless of DAG file naming
 
-### 2. Trigger Rule Support
+### 2. Trigger Rule Support ✅ RESOLVED (via Airflow's native logic)
 
-**Current state**: Only `all_success` trigger rule is supported (`deep_workflow.py:265-266`)
+**Previous state**: Custom trigger rule evaluation was being implemented.
 
-```python
-trigger_rule = getattr(task, 'trigger_rule', 'all_success')
-if upstream_failed and trigger_rule == 'all_success':
-```
+**Correct solution** (per design principle):
+- **Use Airflow's native `update_state()` method** which internally calls `TriggerRuleDep`
+- Both standalone and deep integration use the same in-workflow database pattern
+- `dag_run.update_state(session)` automatically evaluates all 13 trigger rules:
+  - `ALL_SUCCESS` (default), `ALL_FAILED`, `ALL_DONE`
+  - `ALL_DONE_MIN_ONE_SUCCESS`, `ALL_DONE_SETUP_SUCCESS`
+  - `ONE_SUCCESS`, `ONE_FAILED`, `ONE_DONE`
+  - `NONE_FAILED`, `NONE_SKIPPED`, `NONE_FAILED_MIN_ONE_SUCCESS`
+  - `ALWAYS`, `ALL_SKIPPED`
+- **No custom trigger rule code needed** - reuse Airflow's implementation
 
-**Issue**: Airflow supports many trigger rules:
-- `all_success` (default) ✅
-- `all_failed`
-- `all_done`
-- `one_success`
-- `one_failed`
-- `none_failed`
-- `none_skipped`
-- etc.
-
-**Solution**: Implement full trigger rule evaluation logic from Airflow's `TriggerRuleDep`.
+**Why this approach is correct**:
+- Guaranteed identical behavior to Airflow's built-in scheduler
+- No maintenance burden when Airflow updates trigger rule logic
+- Code reuse between standalone and deep integration workflows
 
 ### 3. Mapped Tasks Support
 

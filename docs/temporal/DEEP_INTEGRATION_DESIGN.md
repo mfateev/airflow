@@ -16,6 +16,46 @@ This document describes **Deep Integration Mode** - a deployment model where:
 
 **Key Principle**: Temporal owns execution, Airflow owns user experience.
 
+### Core Architectural Decision: In-Workflow Database + Sync Activities
+
+Deep integration follows the **same design as standalone mode** with one key addition:
+
+1. **In-Workflow Database**: Each workflow has its own in-memory SQLite database with real Airflow models (DagRun, TaskInstance, etc.)
+2. **Reuse Airflow's Native Logic**: All scheduling decisions use Airflow's built-in code:
+   - `dag_run.update_state()` - evaluates trigger rules via TriggerRuleDep
+   - `dag_run.verify_integrity()` - creates TaskInstance records
+   - `dag_run.schedule_tis()` - schedules tasks
+3. **Sync Activities**: Write state from in-workflow DB to real Airflow DB for UI visibility
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Temporal Workflow                                               │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │  In-Workflow Database (SQLite in-memory)                   │  │
+│  │  ├── DagRun (real Airflow model)                          │  │
+│  │  ├── TaskInstance (real Airflow model)                    │  │
+│  │  └── Uses Airflow's native: update_state(), TriggerRuleDep│  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              │                                   │
+│                              │ sync_task_status() activity       │
+│                              ▼                                   │
+└──────────────────────────────┼───────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Airflow Database (PostgreSQL/MySQL)                             │
+│  ├── DagRun (synced for UI visibility)                          │
+│  ├── TaskInstance (synced for UI visibility)                    │
+│  ├── Connections (read by hooks during task execution)          │
+│  └── Variables (read by operators during task execution)        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why this design?**
+- **Correctness**: Reusing Airflow's trigger rule logic guarantees identical behavior to the built-in scheduler
+- **Maintainability**: No need to reimplement and maintain separate scheduling logic
+- **Consistency**: Both standalone and deep integration use the same workflow code path
+
 ### What Changes Where
 
 | Layer | Component | Change Required |
@@ -365,49 +405,196 @@ This section describes all Temporal-side components (no Airflow code changes).
 
 ---
 
-## Workflow: ExecuteAirflowDagWorkflow
+## Workflow: ExecuteAirflowDagDeepWorkflow
 
-The main workflow that orchestrates DAG execution:
+The deep integration workflow uses an **in-workflow database** and reuses Airflow's native scheduling logic,
+with sync activities to mirror state to the real Airflow DB for UI visibility.
+
+### Architecture: In-Workflow Database
+
+Deep integration uses the **same architecture as standalone mode**:
 
 ```python
-# scripts/temporal_airflow/workflows.py
+# scripts/temporal_airflow/deep_workflow.py
 
-@workflow.defn(name="execute_airflow_dag", sandboxed=False)
-class ExecuteAirflowDagWorkflow:
+@workflow.defn(name="execute_airflow_dag_deep", sandboxed=False)
+class ExecuteAirflowDagDeepWorkflow:
+
+    def __init__(self):
+        # In-workflow database (same as standalone)
+        self.engine = None
+        self.sessionFactory = None
+        self.dag = None
+        self.xcom_store: dict[tuple, Any] = {}
+
+    def _initialize_database(self):
+        """Initialize workflow-specific in-memory SQLite database."""
+        workflow_id = workflow.info().workflow_id
+        conn_str = f"sqlite:///file:memdb_{workflow_id}?mode=memory&cache=shared&uri=true"
+        self.engine = create_engine(conn_str, poolclass=StaticPool, ...)
+        self.sessionFactory = sessionmaker(bind=self.engine, ...)
+        Base.metadata.create_all(self.engine)
 
     @workflow.run
-    async def run(self, input: DagExecutionInput) -> DagExecutionResult:
-        # FIRST: Create DagRun record in Airflow DB
-        dagrun_result = await workflow.execute_activity(
+    async def run(self, input: DeepDagExecutionInput) -> DagExecutionResult:
+        # 1. Initialize in-workflow database
+        self._initialize_database()
+
+        # 2. Load serialized DAG from Airflow DB (via activity)
+        dag_data = await workflow.execute_activity(
+            load_serialized_dag,
+            LoadSerializedDagInput(dag_id=input.dag_id),
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        self.dag = SerializedDAG.from_dict(dag_data.dag_data)
+        self.dag_fileloc = dag_data.fileloc
+
+        # 3. Create DagRun in BOTH databases
+        # First: Create in real Airflow DB (if not exists)
+        create_result = await workflow.execute_activity(
             create_dagrun_record,
-            CreateDagRunInput(
-                dag_id=input.dag_id,
-                logical_date=input.logical_date,
-                conf=input.conf,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
+            CreateDagRunInput(dag_id=input.dag_id, logical_date=input.logical_date, ...),
         )
-        self.run_id = dagrun_result.run_id
+        self.run_id = create_result.run_id
 
-        # Execute tasks based on DAG structure
-        # ... task scheduling loop ...
+        # Then: Create in in-workflow DB (for Airflow's scheduling logic)
+        self._create_local_dag_run(...)
 
-        # On completion, sync final state
-        await workflow.execute_activity(
-            sync_dagrun_status,
-            DagRunStatusSync(
-                dag_id=self.dag_id,
-                run_id=self.run_id,
-                state="success" if self.tasks_failed == 0 else "failed",
-                end_date=workflow.now(),
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-        )
+        # 4. Ensure TaskInstances exist in real Airflow DB
+        await workflow.execute_activity(ensure_task_instances, ...)
 
+        # 5. Main scheduling loop (uses Airflow's native logic)
+        final_state = await self._scheduling_loop(...)
+
+        # 6. Sync final state
+        await workflow.execute_activity(sync_dagrun_status, ...)
         return result
 ```
 
-**Key design**: Workflow creates DagRun as its first action, ensuring no orphan records if workflow fails to start.
+### Key Design: Reuse Airflow's Native Scheduling Logic
+
+The scheduling loop uses Airflow's built-in methods instead of custom logic:
+
+```python
+async def _scheduling_loop(self, dag_run_id: int) -> str:
+    """Uses Airflow's native scheduling logic."""
+
+    session = self.sessionFactory()
+    dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
+    dag_run.dag = self.dag
+
+    # CRITICAL: Use Airflow's native update_state() method
+    # This internally uses TriggerRuleDep to evaluate trigger rules!
+    schedulable_tis, callback = dag_run.update_state(
+        session=session,
+        execute_callbacks=False,
+    )
+
+    # Airflow's native schedule_tis() marks tasks as QUEUED
+    if schedulable_tis:
+        dag_run.schedule_tis(schedulable_tis, session=session)
+
+    # Start activities for schedulable tasks
+    for ti in schedulable_tis:
+        # Sync task state to real Airflow DB BEFORE starting activity
+        await workflow.execute_activity(sync_task_status, TaskStatusSync(
+            dag_id=ti.dag_id, task_id=ti.task_id, run_id=self.run_id,
+            state=ti.state.value, start_date=workflow.now(),
+        ))
+
+        # Start task execution activity
+        handle = workflow.start_activity(run_airflow_task, ...)
+```
+
+### Comparison: Standalone vs Deep Integration
+
+| Aspect | Standalone | Deep Integration |
+|--------|------------|------------------|
+| **In-workflow database** | ✅ Yes | ✅ Yes (same design) |
+| **Uses update_state()** | ✅ Yes | ✅ Yes (same logic) |
+| **Uses TriggerRuleDep** | ✅ Yes (via update_state) | ✅ Yes (via update_state) |
+| **DAG source** | Passed in workflow input | Loaded from Airflow DB via activity |
+| **Connections/Variables** | Passed in workflow input | Read from real Airflow DB by hooks |
+| **State visibility** | Workflow state only | Synced to real Airflow DB |
+| **Airflow UI** | Not visible | Full visibility |
+
+**The only difference**: Deep integration adds sync activities to write state to the real Airflow DB,
+and loads DAG/connections from the real DB instead of workflow input.
+
+### Why Reuse Airflow's Native Logic?
+
+#### Trigger Rules in Airflow
+
+Airflow supports 13 different trigger rules that determine when a task should run:
+
+| Trigger Rule | Description |
+|--------------|-------------|
+| `all_success` | (Default) Run when all upstream tasks succeed |
+| `all_failed` | Run when all upstream tasks fail |
+| `all_done` | Run when all upstream tasks complete (any state) |
+| `all_skipped` | Run when all upstream tasks are skipped |
+| `one_success` | Run when at least one upstream succeeds |
+| `one_failed` | Run when at least one upstream fails |
+| `one_done` | Run when at least one upstream completes |
+| `none_failed` | Run when no upstream tasks failed (skipped OK) |
+| `none_failed_min_one_success` | None failed and at least one succeeded |
+| `none_skipped` | Run when no upstream tasks are skipped |
+| `always` | Run regardless of upstream state |
+| `no_trigger` | Externally triggered only |
+
+#### How the Built-in Scheduler Handles Trigger Rules
+
+The Airflow scheduler evaluates trigger rules through a dependency chain:
+
+```
+Scheduler Loop
+     │
+     ▼
+dag_run.update_state(session)
+     │
+     ▼
+TaskInstance.evaluate_dep_context()
+     │
+     ▼
+TriggerRuleDep.get_dep_statuses()
+     │
+     ├─ Counts upstream states (success, failed, skipped, etc.)
+     ├─ Applies trigger rule logic
+     └─ Returns DepStatus (met/not met)
+```
+
+The key class is `TriggerRuleDep` (located in `airflow/ti_deps/deps/trigger_rule_dep.py`).
+This class:
+1. Queries upstream task states
+2. Counts how many are in each state
+3. Applies the trigger rule logic
+4. Returns whether the dependency is met
+
+#### Why NOT Reimplement Trigger Rule Logic
+
+Reimplementing trigger rules in the Temporal workflow would be:
+
+1. **Error-prone**: 13 rules with subtle edge cases
+2. **Maintenance burden**: Must track Airflow changes
+3. **Inconsistent**: Could behave differently than Airflow scheduler
+4. **Unnecessary**: Airflow's code already handles this perfectly
+
+#### How We Reuse Airflow's Logic
+
+By using an in-workflow database with real Airflow models:
+
+```python
+# In the workflow scheduling loop:
+dag_run.update_state(session=session)  # ← This calls TriggerRuleDep internally!
+```
+
+`dag_run.update_state()` internally:
+1. Iterates through all TaskInstances
+2. Calls `ti._get_dep_statuses()` which includes `TriggerRuleDep`
+3. Returns tasks that are now schedulable
+
+**Result**: Deep integration gets identical trigger rule behavior to Airflow's built-in scheduler
+with zero custom logic required.
 
 ---
 
@@ -624,39 +811,105 @@ class TemporalScheduleTrigger:
 
 ## Data Flow
 
-### Flow 1: User Triggers DAG Run
+### Flow 1: User Triggers DAG Run (Deep Integration)
 
 ```
 1. User clicks "Trigger DAG" in Airflow UI
                     │
                     ▼
 2. API/Orchestrator starts Temporal workflow
-   - Passes dag_id, conf, logical_date
-   - Workflow ID = "airflow-{dag_id}-{logical_date}"
+   - Passes dag_id, conf, logical_date, run_id (if exists)
+   - Workflow ID = "airflow-{dag_id}-{run_id}"
                     │
                     ▼
-3. Workflow's FIRST activity: create_dagrun_record
-   - Creates DagRun with run_type=EXTERNAL, state=RUNNING
-   - Creates TaskInstance records
-   - Scheduler ignores EXTERNAL runs
+3. Workflow initializes IN-WORKFLOW DATABASE
+   - Creates in-memory SQLite with Airflow schema
+   - Same pattern as standalone workflow
                     │
                     ▼
-4. Workflow executes tasks via activities
-   - Each completion triggers sync_task_status
-   - UI shows real-time updates
+4. Activity: load_serialized_dag
+   - Loads DAG from SerializedDagModel in real Airflow DB
+   - Returns serialized dict + fileloc
                     │
                     ▼
-5. Workflow completes, syncs final state
+5. Activity: create_dagrun_record (if needed)
+   - Creates DagRun in REAL Airflow DB with run_type=EXTERNAL
+   - Returns run_id for syncing
+                    │
+                    ▼
+6. Workflow creates DagRun in IN-WORKFLOW DB
+   - Uses Airflow's DagRun model directly
+   - verify_integrity() creates TaskInstances
+   - This enables Airflow's native scheduling logic
+                    │
+                    ▼
+7. SCHEDULING LOOP (using Airflow's native logic)
+   ┌─────────────────────────────────────────────────┐
+   │ dag_run.update_state(session)                   │
+   │    ├─ Evaluates TriggerRuleDep for each task    │
+   │    └─ Returns schedulable_tis                   │
+   │                                                 │
+   │ dag_run.schedule_tis(schedulable_tis)          │
+   │    └─ Marks tasks as QUEUED in in-workflow DB   │
+   │                                                 │
+   │ For each schedulable task:                      │
+   │    ├─ sync_task_status activity → Real DB       │
+   │    └─ run_airflow_task activity → Execute       │
+   │                                                 │
+   │ On task completion:                             │
+   │    ├─ Update in-workflow DB                     │
+   │    └─ sync_task_status activity → Real DB       │
+   └─────────────────────────────────────────────────┘
+                    │
+                    ▼
+8. Workflow completes
+   - sync_dagrun_status activity → Real DB
    - Airflow UI shows SUCCESS/FAILED
 ```
 
-### Flow 2: Task Execution with Connections
+### Flow 2: Scheduling Logic (In-Workflow Database)
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│  IN-WORKFLOW DATABASE (SQLite in-memory)                       │
+│                                                                │
+│  ┌─────────────────┐     ┌──────────────────────────────────┐ │
+│  │    DagRun       │     │        TaskInstances              │ │
+│  │  state=RUNNING  │     │  task_a: SUCCESS                  │ │
+│  │                 │     │  task_b: SUCCESS                  │ │
+│  │                 │     │  task_c: NONE (waiting)           │ │
+│  └─────────────────┘     └──────────────────────────────────┘ │
+│                                     │                          │
+│  dag_run.update_state(session)      │                          │
+│           │                         │                          │
+│           ▼                         ▼                          │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │  TriggerRuleDep.get_dep_statuses() for task_c            │ │
+│  │                                                          │ │
+│  │  task_c.trigger_rule = "all_success"                     │ │
+│  │  upstream = [task_a, task_b]                             │ │
+│  │  upstream_states = {SUCCESS: 2, FAILED: 0}               │ │
+│  │                                                          │ │
+│  │  RESULT: Dependencies MET → task_c is schedulable!       │ │
+│  └──────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────┘
+                              │
+                              │ sync_task_status activity
+                              ▼
+┌───────────────────────────────────────────────────────────────┐
+│  REAL AIRFLOW DATABASE (PostgreSQL/MySQL)                      │
+│                                                                │
+│  TaskInstance for task_c: state = QUEUED (synced for UI)       │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Flow 3: Task Execution with Connections
 
 ```
 Workflow starts run_airflow_task activity
                     │
                     ▼
-Activity loads DAG file, extracts operator
+Activity loads DAG from file (using dag_fileloc)
                     │
                     ▼
 Operator executes, hook needs connection
@@ -665,14 +918,17 @@ Operator executes, hook needs connection
 Hook calls BaseHook.get_connection("my_conn")
                     │
                     ▼
-Airflow's connection lookup reads from DB
+Airflow's connection lookup reads from REAL DB
    (standard path, zero changes needed!)
                     │
                     ▼
 Operator completes, activity returns result
                     │
                     ▼
-Workflow calls sync_task_status activity
+Workflow updates IN-WORKFLOW DB
+                    │
+                    ▼
+Workflow calls sync_task_status activity → REAL DB
 ```
 
 ---
@@ -781,34 +1037,78 @@ python scripts/temporal_airflow/worker.py
 |--------|--------|-------|
 | Add `DagRunType.EXTERNAL` | Tiny | ~3 |
 | Add scheduler filter | Tiny | ~4 |
-| **Total minimal** | **Tiny** | **~7** |
-
-### Phase 1-3: Temporal Components (No Airflow Changes)
-
-| Phase | Component | Effort |
-|-------|-----------|--------|
-| 1 | `create_dagrun_record` activity | Small |
-| 2 | `sync_task_status`, `sync_dagrun_status` activities | Small |
-| 3 | Modify workflow for workflow-first pattern | Small |
-
-### Phase 4-6: Integration
-
-| Phase | Component | Effort |
-|-------|-----------|--------|
-| 4 | Trigger Service (for minimal approach) | Medium |
-| 5 | Airflow configuration section | Small |
-| 6 | Pool support | Medium |
-
-### Future: Orchestrator Extension (Additional Airflow PR)
-
-| Component | Effort | Lines |
-|-----------|--------|-------|
 | `BaseDagRunOrchestrator` interface | Small | ~40 |
-| `DefaultOrchestrator` | Small | ~15 |
 | `orchestrator_loader.py` | Small | ~20 |
-| Integration in DagRun creation | Small | ~5 |
-| `TemporalOrchestrator` provider | Small | ~60 |
-| **Total** | **Small** | **~140** |
+| **Total** | **Small** | **~70** |
+
+### Phase 1: Deep Workflow Foundation
+
+Create `ExecuteAirflowDagDeepWorkflow` following standalone pattern:
+
+| Component | Description | Effort |
+|-----------|-------------|--------|
+| In-workflow database | SQLite in-memory with Airflow models | Copy from standalone |
+| `_initialize_database()` | Create workflow-specific DB | Copy from standalone |
+| `_create_local_dag_run()` | Create DagRun in in-workflow DB | Copy from standalone |
+| Reuse `update_state()` | Airflow's native trigger rule evaluation | No custom code |
+| Reuse `schedule_tis()` | Airflow's native task scheduling | No custom code |
+
+### Phase 2: Sync Activities
+
+Activities to sync in-workflow state to real Airflow DB:
+
+| Activity | Description | Effort |
+|----------|-------------|--------|
+| `load_serialized_dag` | Load DAG from SerializedDagModel | Small |
+| `create_dagrun_record` | Create DagRun in real Airflow DB | Small |
+| `ensure_task_instances` | Create TaskInstance records in real DB | Small |
+| `sync_task_status` | Sync TaskInstance state to real DB | Small |
+| `sync_dagrun_status` | Sync DagRun state to real DB | Small |
+
+### Phase 3: Integration with Orchestrator
+
+| Component | Description | Effort |
+|-----------|-------------|--------|
+| `TemporalOrchestrator` | Routes DagRun creation to Temporal workflow | Small |
+| Input model | `DeepDagExecutionInput` (dag_id, run_id, logical_date, conf) | Small |
+| Worker configuration | Support Airflow DB connection | Small |
+
+### Phase 4: Feature Parity
+
+| Feature | How Handled | Effort |
+|---------|-------------|--------|
+| Trigger rules | Via `update_state()` → TriggerRuleDep | ✅ Already works |
+| XCom | Store in workflow state + sync to real DB | Small |
+| Pools | Read limits from real DB, enforce in workflow | Medium |
+| Task retries | Temporal retry policy | Small |
+
+### Design Principle: Maximize Code Reuse
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Standalone Workflow (workflows.py)                             │
+│  ├── _initialize_database()                                    │
+│  ├── _create_dag_run()                                         │
+│  ├── _scheduling_loop()                                        │
+│  │      └── dag_run.update_state() ← Airflow's native logic    │
+│  └── _handle_activity_result()                                 │
+└────────────────────────────────────────────────────────────────┘
+                              │
+                              │ Copy/share these methods
+                              ▼
+┌────────────────────────────────────────────────────────────────┐
+│  Deep Workflow (deep_workflow.py)                               │
+│  ├── _initialize_database()     (same as standalone)           │
+│  ├── _create_local_dag_run()    (same as standalone)           │
+│  ├── _scheduling_loop()         (same + sync activities)       │
+│  │      └── dag_run.update_state() ← Same native logic!        │
+│  ├── _handle_activity_result()  (same + sync activities)       │
+│  └── NEW: Sync activities to write to real Airflow DB          │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight**: The deep workflow should look almost identical to standalone,
+just with sync activities added at key state transition points.
 
 ---
 
