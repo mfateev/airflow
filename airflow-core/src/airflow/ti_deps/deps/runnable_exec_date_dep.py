@@ -19,15 +19,8 @@ from __future__ import annotations
 
 from airflow._shared.timezones import timezone
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
-
-# Try to import Temporal time provider, fall back to timezone.utcnow() if not available
-try:
-    from temporal_airflow.time_provider import get_current_time
-except ImportError:
-    def get_current_time():
-        return timezone.utcnow()
-
 from airflow.utils.session import provide_session
+from airflow.utils.time_provider import get_current_time
 
 
 class RunnableExecDateDep(BaseTIDep):

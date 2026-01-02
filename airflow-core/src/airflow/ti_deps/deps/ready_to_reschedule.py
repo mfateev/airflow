@@ -21,15 +21,8 @@ from airflow._shared.timezones import timezone
 from airflow.models.taskreschedule import TaskReschedule
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
 from airflow.utils.session import provide_session
-
-# Try to import Temporal time provider, fall back to timezone.utcnow() if not available
-try:
-    from temporal_airflow.time_provider import get_current_time
-except ImportError:
-    def get_current_time():
-        return timezone.utcnow()
-
 from airflow.utils.state import TaskInstanceState
+from airflow.utils.time_provider import get_current_time
 
 
 class ReadyToRescheduleDep(BaseTIDep):

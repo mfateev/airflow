@@ -19,7 +19,7 @@ with workflow.unsafe.imports_passed_through():
     from airflow.models.trigger import Trigger  # Required for Callback foreign key
     from airflow.serialization.serialized_objects import SerializedDAG  # Still needed for DAG deserialization
     from airflow._shared.timezones import timezone as airflow_timezone
-    from temporal_airflow.time_provider import set_workflow_time, clear_workflow_time
+    from airflow.utils.time_provider import set_time_provider, clear_time_provider
     from sqlalchemy import create_engine
     from sqlalchemy.pool import StaticPool
     from sqlalchemy.orm import sessionmaker
@@ -79,6 +79,10 @@ class ExecuteAirflowDagWorkflow:
             DagExecutionResult with final state and statistics
         """
         workflow.logger.info(f"Starting DAG execution: {input.dag_id} / {input.run_id}")
+
+        # Set Temporal's deterministic time provider for Airflow code
+        # workflow.now is context-aware and returns correct time per workflow
+        set_time_provider(workflow.now)
 
         start_time = workflow.now()
 
@@ -154,7 +158,7 @@ class ExecuteAirflowDagWorkflow:
             )
 
         finally:
-            clear_workflow_time()
+            clear_time_provider()
 
     def _initialize_database(self):
         """
@@ -202,8 +206,6 @@ class ExecuteAirflowDagWorkflow:
         - Uses workflow-specific SessionFactory
         - Never uses global create_session()
         """
-        set_workflow_time(workflow.now())
-
         # Use workflow-specific session (Decision 1)
         session = self.sessionFactory()
         try:
@@ -267,8 +269,6 @@ class ExecuteAirflowDagWorkflow:
         - result.state is already TaskInstanceState enum
         - Direct assignment works (no conversion needed)
         """
-        set_workflow_time(workflow.now())
-
         session = self.sessionFactory()
         try:
             ti = session.query(TaskInstance).filter(
@@ -314,9 +314,6 @@ class ExecuteAirflowDagWorkflow:
                 f"Scheduling loop iteration {iteration + 1}: "
                 f"{len(running_activities)} activities running"
             )
-
-            # Update workflow time (deterministic)
-            set_workflow_time(workflow.now())
 
             # Decision 6: Sync calls acceptable (fast, in-memory DB)
             session = self.sessionFactory()
