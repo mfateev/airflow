@@ -290,7 +290,7 @@ class TestLoadSerializedDag:
     @pytest.mark.asyncio
     @patch("temporal_airflow.sync_activities.create_session")
     async def test_loads_serialized_dag(self, mock_create_session):
-        """load_serialized_dag should return serialized DAG data."""
+        """load_serialized_dag should return serialized DAG data and fileloc."""
         mock_session = MagicMock()
         mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
@@ -301,6 +301,7 @@ class TestLoadSerializedDag:
             "dag_id": "test_dag",
             "tasks": [{"task_id": "task1"}, {"task_id": "task2"}],
         }
+        mock_serialized.fileloc = "/opt/airflow/dags/subdirectory/my_dag_file.py"
 
         with patch(
             "temporal_airflow.sync_activities.SerializedDagModel.get",
@@ -310,9 +311,11 @@ class TestLoadSerializedDag:
 
             result = await load_serialized_dag(input_data)
 
-            assert result == mock_serialized.data
-            assert result["dag_id"] == "test_dag"
-            assert len(result["tasks"]) == 2
+            # Verify LoadSerializedDagResult structure
+            assert result.dag_data == mock_serialized.data
+            assert result.dag_data["dag_id"] == "test_dag"
+            assert len(result.dag_data["tasks"]) == 2
+            assert result.fileloc == "/opt/airflow/dags/subdirectory/my_dag_file.py"
 
     @pytest.mark.asyncio
     @patch("temporal_airflow.sync_activities.create_session")

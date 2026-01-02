@@ -42,6 +42,7 @@ from temporal_airflow.models import (
     DagRunStatusSync,
     EnsureTaskInstancesInput,
     LoadSerializedDagInput,
+    LoadSerializedDagResult,
     TaskStatusSync,
 )
 
@@ -236,12 +237,13 @@ async def sync_dagrun_status(input: DagRunStatusSync) -> None:
 
 
 @activity.defn(name="load_serialized_dag")
-async def load_serialized_dag(input: LoadSerializedDagInput) -> dict[str, Any]:
+async def load_serialized_dag(input: LoadSerializedDagInput) -> LoadSerializedDagResult:
     """
     Load serialized DAG from Airflow database.
 
-    Returns the serialized DAG data dict that can be deserialized
-    using SerializedDAG.from_dict().
+    Returns the serialized DAG data dict and file location. The data can be
+    deserialized using SerializedDAG.from_dict(). The fileloc is the path
+    to the DAG file relative to DAGS_FOLDER.
     """
     activity.logger.info(f"Loading serialized DAG: {input.dag_id}")
 
@@ -254,8 +256,13 @@ async def load_serialized_dag(input: LoadSerializedDagInput) -> dict[str, Any]:
                 non_retryable=True,
             )
 
-        activity.logger.info(f"Loaded serialized DAG: {input.dag_id}")
-        return serialized.data
+        activity.logger.info(
+            f"Loaded serialized DAG: {input.dag_id} (fileloc={serialized.fileloc})"
+        )
+        return LoadSerializedDagResult(
+            dag_data=serialized.data,
+            fileloc=serialized.fileloc,
+        )
 
 
 @activity.defn(name="ensure_task_instances")

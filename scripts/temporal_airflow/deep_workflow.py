@@ -60,6 +60,7 @@ class ExecuteAirflowDagDeepWorkflow:
         # Deep integration state
         self.run_id: str | None = None
         self.dag: Any = None  # SerializedDAG
+        self.dag_fileloc: str | None = None  # DAG file location from SerializedDagModel
 
         # XCom state in workflow (for passing to activities)
         self.xcom_store: dict[tuple, Any] = {}  # ti_key -> xcom_data
@@ -120,13 +121,17 @@ class ExecuteAirflowDagDeepWorkflow:
                 workflow.logger.info(f"Created DagRun: {self.run_id}")
 
             # Phase 2: Load serialized DAG from Airflow DB
-            dag_data = await workflow.execute_activity(
+            dag_result = await workflow.execute_activity(
                 load_serialized_dag,
                 LoadSerializedDagInput(dag_id=input.dag_id),
                 start_to_close_timeout=timedelta(seconds=30),
             )
-            self.dag = SerializedDAG.from_dict(dag_data)
-            workflow.logger.info(f"Loaded DAG: {self.dag.dag_id} with {len(self.dag.task_dict)} tasks")
+            self.dag = SerializedDAG.from_dict(dag_result.dag_data)
+            self.dag_fileloc = dag_result.fileloc
+            workflow.logger.info(
+                f"Loaded DAG: {self.dag.dag_id} with {len(self.dag.task_dict)} tasks "
+                f"(fileloc={self.dag_fileloc})"
+            )
 
             # Phase 3: Execute scheduling loop with status sync
             final_state = await self._scheduling_loop(input.dag_id)
@@ -305,9 +310,6 @@ class ExecuteAirflowDagDeepWorkflow:
                 # Gather upstream XCom
                 upstream_results = self._get_upstream_xcom(task_id, dag_id, self.run_id, -1)
 
-                # DAG file path (relative to DAGS_FOLDER)
-                dag_rel_path = f"{dag_id}.py"
-
                 activity_queue = workflow.info().task_queue
 
                 workflow.logger.info(
@@ -325,7 +327,7 @@ class ExecuteAirflowDagDeepWorkflow:
                         logical_date=workflow.now(),  # Use workflow time
                         try_number=1,
                         map_index=-1,
-                        dag_rel_path=dag_rel_path,
+                        dag_rel_path=self.dag_fileloc,  # From SerializedDagModel.fileloc
                         upstream_results=upstream_results,
                         # Deep integration: connections/variables from Airflow DB
                         connections=None,

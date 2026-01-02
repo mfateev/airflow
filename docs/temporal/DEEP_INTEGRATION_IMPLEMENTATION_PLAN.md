@@ -575,19 +575,15 @@ Phases 1-4 are the core implementation (✅ complete). Phases 5-6 are enhancemen
 
 The following gaps exist in the current implementation and should be addressed in future iterations:
 
-### 1. DAG File Path Resolution
+### 1. DAG File Path Resolution ✅ RESOLVED
 
-**Current state**: Hardcoded as `{dag_id}.py` in `deep_workflow.py:309`
+**Previous state**: Hardcoded as `{dag_id}.py`
 
-```python
-dag_rel_path = f"{dag_id}.py"
-```
-
-**Issue**: DAG files may have different names than their `dag_id`, or be in subdirectories.
-
-**Solution options**:
-- Read `fileloc` from `SerializedDagModel` in `load_serialized_dag` activity
-- Add `dag_file_path` field to `DeepDagExecutionInput`
+**Solution implemented**:
+- Added `LoadSerializedDagResult` model with `dag_data` and `fileloc` fields
+- Updated `load_serialized_dag` activity to return `fileloc` from `SerializedDagModel`
+- Workflow stores `self.dag_fileloc` and passes it to activities
+- Activities now receive the correct file path regardless of DAG file naming
 
 ### 2. Trigger Rule Support
 

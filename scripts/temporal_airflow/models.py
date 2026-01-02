@@ -270,6 +270,13 @@ class LoadSerializedDagInput(BaseModel):
     dag_id: str = Field(..., description="DAG identifier to load from SerializedDagModel")
 
 
+class LoadSerializedDagResult(BaseModel):
+    """Result from load_serialized_dag activity."""
+
+    dag_data: dict[str, Any] = Field(..., description="Serialized DAG data dict")
+    fileloc: str = Field(..., description="DAG file location (relative to DAGS_FOLDER)")
+
+
 class EnsureTaskInstancesInput(BaseModel):
     """Input for ensure_task_instances activity."""
 

@@ -49,6 +49,7 @@ class TestDeepWorkflowStructure:
         workflow = ExecuteAirflowDagDeepWorkflow()
         assert workflow.run_id is None
         assert workflow.dag is None
+        assert workflow.dag_fileloc is None
         assert workflow.xcom_store == {}
         assert workflow.tasks_succeeded == 0
         assert workflow.tasks_failed == 0
@@ -193,6 +194,7 @@ class TestActivityIntegration:
             TaskStatusSync,
             DagRunStatusSync,
             LoadSerializedDagInput,
+            LoadSerializedDagResult,
             EnsureTaskInstancesInput,
         )
 
@@ -218,6 +220,10 @@ class TestActivityIntegration:
             state="success",
         )
         assert LoadSerializedDagInput(dag_id="test")
+        assert LoadSerializedDagResult(
+            dag_data={"dag_id": "test"},
+            fileloc="/opt/airflow/dags/test.py",
+        )
         assert EnsureTaskInstancesInput(dag_id="test", run_id="run")
 
 
