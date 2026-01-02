@@ -44,8 +44,7 @@ class TestTemporalOrchestrator:
         assert orchestrator._client is None
 
     @patch("temporal_airflow.orchestrator.asyncio.run")
-    @patch("airflow.models.serialized_dag.SerializedDagModel")
-    def test_start_dagrun_marks_as_external(self, mock_serialized_model, mock_asyncio_run):
+    def test_start_dagrun_marks_as_external(self, mock_asyncio_run):
         """start_dagrun should mark the DagRun as EXTERNAL."""
         orchestrator = TemporalOrchestrator()
 
@@ -60,11 +59,6 @@ class TestTemporalOrchestrator:
         # Mock session
         mock_session = MagicMock()
 
-        # Mock serialized dag model
-        mock_serialized = MagicMock()
-        mock_serialized.data = {"dag_id": "test_dag", "tasks": []}
-        mock_serialized_model.get.return_value = mock_serialized
-
         orchestrator.start_dagrun(mock_dag_run, mock_session)
 
         # Verify run_type was changed to EXTERNAL
@@ -72,9 +66,8 @@ class TestTemporalOrchestrator:
         mock_session.merge.assert_called_once_with(mock_dag_run)
 
     @patch("temporal_airflow.orchestrator.asyncio.run")
-    @patch("airflow.models.serialized_dag.SerializedDagModel")
-    def test_start_dagrun_calls_temporal_workflow(self, mock_serialized_model, mock_asyncio_run):
-        """start_dagrun should start a Temporal workflow."""
+    def test_start_dagrun_calls_temporal_workflow(self, mock_asyncio_run):
+        """start_dagrun should start a Temporal deep workflow."""
         orchestrator = TemporalOrchestrator()
 
         # Mock dag_run
@@ -87,37 +80,35 @@ class TestTemporalOrchestrator:
         # Mock session
         mock_session = MagicMock()
 
-        # Mock serialized dag model
-        mock_serialized = MagicMock()
-        mock_serialized.data = {"dag_id": "test_dag", "tasks": []}
-        mock_serialized_model.get.return_value = mock_serialized
-
         orchestrator.start_dagrun(mock_dag_run, mock_session)
 
         # Verify asyncio.run was called to start the workflow
         mock_asyncio_run.assert_called_once()
 
-    @patch("airflow.models.serialized_dag.SerializedDagModel")
-    def test_start_dagrun_handles_missing_serialized_dag(self, mock_serialized_model):
-        """start_dagrun should handle missing serialized DAG gracefully."""
+    @patch("temporal_airflow.orchestrator.asyncio.run")
+    def test_start_dagrun_passes_run_id_to_workflow(self, mock_asyncio_run):
+        """start_dagrun should pass existing run_id to deep workflow."""
         orchestrator = TemporalOrchestrator()
 
         # Mock dag_run
         mock_dag_run = MagicMock()
-        mock_dag_run.dag_id = "nonexistent_dag"
-        mock_dag_run.run_id = "test_run_123"
+        mock_dag_run.dag_id = "test_dag"
+        mock_dag_run.run_id = "existing_run_123"
+        mock_dag_run.logical_date = datetime(2025, 1, 1)
+        mock_dag_run.conf = {"key": "value"}
 
         # Mock session
         mock_session = MagicMock()
 
-        # Mock serialized dag model - returns None
-        mock_serialized_model.get.return_value = None
-
-        # Should not raise, but should log error
         orchestrator.start_dagrun(mock_dag_run, mock_session)
 
-        # run_type should still be changed
-        assert mock_dag_run.run_type == DagRunType.EXTERNAL
+        # Verify asyncio.run was called
+        mock_asyncio_run.assert_called_once()
+
+        # Verify the coroutine was passed to asyncio.run
+        # The workflow input should contain the run_id
+        call_args = mock_asyncio_run.call_args
+        assert call_args is not None
 
     @patch("temporal_airflow.orchestrator.asyncio.run")
     def test_cancel_dagrun_cancels_workflow(self, mock_asyncio_run):

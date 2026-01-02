@@ -220,3 +220,78 @@ class DagExecutionFailureDetails(BaseModel):
     tasks_succeeded: int = Field(..., description="Number of successful tasks")
     tasks_failed: int = Field(..., description="Number of failed tasks")
     error_message: str = Field(..., description="Error summary")
+
+
+# ============================================================================
+# Deep Integration Models (DB Sync)
+# ============================================================================
+
+
+class CreateDagRunInput(BaseModel):
+    """Input for create_dagrun_record activity."""
+
+    dag_id: str = Field(..., description="DAG identifier")
+    logical_date: datetime = Field(..., description="Logical execution date")
+    conf: dict[str, Any] | None = Field(default=None, description="DAG run configuration")
+
+
+class CreateDagRunResult(BaseModel):
+    """Result from create_dagrun_record activity."""
+
+    run_id: str = Field(..., description="Generated run_id for the DagRun")
+    dag_run_id: int = Field(..., description="Database primary key ID")
+
+
+class TaskStatusSync(BaseModel):
+    """Input for sync_task_status activity."""
+
+    dag_id: str = Field(..., description="DAG identifier")
+    task_id: str = Field(..., description="Task identifier")
+    run_id: str = Field(..., description="DAG run identifier")
+    map_index: int = Field(default=-1, description="Mapped task index (-1 for non-mapped)")
+    state: str = Field(..., description="TaskInstanceState value as string")
+    start_date: datetime | None = Field(default=None, description="Task start time")
+    end_date: datetime | None = Field(default=None, description="Task end time")
+    xcom_value: Any | None = Field(default=None, description="XCom return value to store")
+
+
+class DagRunStatusSync(BaseModel):
+    """Input for sync_dagrun_status activity."""
+
+    dag_id: str = Field(..., description="DAG identifier")
+    run_id: str = Field(..., description="DAG run identifier")
+    state: str = Field(..., description="DagRunState value as string")
+    end_date: datetime | None = Field(default=None, description="DAG run end time")
+
+
+class LoadSerializedDagInput(BaseModel):
+    """Input for load_serialized_dag activity."""
+
+    dag_id: str = Field(..., description="DAG identifier to load from SerializedDagModel")
+
+
+class EnsureTaskInstancesInput(BaseModel):
+    """Input for ensure_task_instances activity."""
+
+    dag_id: str = Field(..., description="DAG identifier")
+    run_id: str = Field(..., description="DAG run identifier")
+
+
+class DeepDagExecutionInput(BaseModel):
+    """
+    Input model for deep integration workflow.
+
+    Unlike DagExecutionInput, this workflow:
+    - Uses real Airflow DB (not in-memory SQLite)
+    - Creates DagRun/TaskInstance records via activities
+    - Syncs status back to Airflow DB for UI visibility
+    - Reads connections/variables from Airflow DB
+    """
+
+    dag_id: str = Field(..., description="DAG identifier")
+    logical_date: datetime = Field(..., description="Logical execution date")
+    run_id: str | None = Field(
+        default=None,
+        description="Existing run_id if DagRun already created (e.g., by orchestrator)",
+    )
+    conf: dict[str, Any] | None = Field(default=None, description="DAG run configuration")

@@ -28,8 +28,8 @@ from airflow.orchestrators.base_orchestrator import BaseDagRunOrchestrator
 from airflow.utils.types import DagRunType
 
 from temporal_airflow.client_config import create_temporal_client, get_task_queue
-from temporal_airflow.models import DagExecutionInput
-from temporal_airflow.workflows import ExecuteAirflowDagWorkflow
+from temporal_airflow.models import DeepDagExecutionInput
+from temporal_airflow.deep_workflow import ExecuteAirflowDagDeepWorkflow
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -74,11 +74,16 @@ class TemporalOrchestrator(BaseDagRunOrchestrator):
 
     def start_dagrun(self, dag_run: DagRun, session: Session) -> None:
         """
-        Start Temporal workflow for this DagRun.
+        Start Temporal workflow for this DagRun using deep integration.
 
         This method:
         1. Marks the DagRun as EXTERNAL so the scheduler ignores it
-        2. Starts a Temporal workflow to orchestrate the DAG execution
+        2. Starts a deep integration Temporal workflow
+
+        The deep workflow:
+        - Loads serialized DAG from Airflow DB via activity
+        - Syncs status back to Airflow DB for UI visibility
+        - Uses real Airflow DB for connections/variables
 
         :param dag_run: The DagRun to orchestrate
         :param session: Database session for DB operations
@@ -87,24 +92,13 @@ class TemporalOrchestrator(BaseDagRunOrchestrator):
         dag_run.run_type = DagRunType.EXTERNAL
         session.merge(dag_run)
 
-        # Get serialized DAG for the workflow
-        from airflow.models.serialized_dag import SerializedDagModel
-
-        serialized_model = SerializedDagModel.get(dag_run.dag_id, session=session)
-        if not serialized_model:
-            log.error(
-                "Cannot start Temporal workflow for DAG %s: no serialized DAG found",
-                dag_run.dag_id,
-            )
-            return
-
-        # Build workflow input
-        workflow_input = DagExecutionInput(
+        # Build workflow input for deep integration
+        # Note: No serialized_dag passed - workflow loads it via activity
+        workflow_input = DeepDagExecutionInput(
             dag_id=dag_run.dag_id,
-            run_id=dag_run.run_id,
             logical_date=dag_run.logical_date,
+            run_id=dag_run.run_id,  # Pass existing run_id
             conf=dag_run.conf or {},
-            serialized_dag=serialized_model.data,
         )
 
         # Start the Temporal workflow
@@ -113,7 +107,7 @@ class TemporalOrchestrator(BaseDagRunOrchestrator):
         try:
             asyncio.run(self._start_workflow_async(workflow_id, workflow_input))
             log.info(
-                "Started Temporal workflow %s for DagRun %s/%s",
+                "Started Temporal deep workflow %s for DagRun %s/%s",
                 workflow_id,
                 dag_run.dag_id,
                 dag_run.run_id,
@@ -131,14 +125,14 @@ class TemporalOrchestrator(BaseDagRunOrchestrator):
     async def _start_workflow_async(
         self,
         workflow_id: str,
-        input: DagExecutionInput,
+        input: DeepDagExecutionInput,
     ) -> None:
-        """Start the Temporal workflow (async implementation)."""
+        """Start the Temporal deep integration workflow (async implementation)."""
         client = await self._get_client()
         task_queue = get_task_queue()
 
         await client.start_workflow(
-            ExecuteAirflowDagWorkflow.run,
+            ExecuteAirflowDagDeepWorkflow.run,
             input,
             id=workflow_id,
             task_queue=task_queue,
