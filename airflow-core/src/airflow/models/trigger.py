@@ -32,7 +32,14 @@ from sqlalchemy.sql.functions import coalesce
 from airflow._shared.timezones import timezone
 from airflow.assets.manager import AssetManager
 from airflow.configuration import conf
-from temporal_airflow.time_provider import get_current_time
+
+# Try to import Temporal time provider, fall back to timezone.utcnow() if not available
+try:
+    from temporal_airflow.time_provider import get_current_time
+except ImportError:
+    def get_current_time():
+        return timezone.utcnow()
+
 from airflow.models import Callback
 from airflow.models.asset import AssetWatcherModel
 from airflow.models.base import Base

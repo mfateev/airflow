@@ -57,7 +57,15 @@ from sqlalchemy.sql.functions import coalesce
 from sqlalchemy_utils import UUIDType
 
 from airflow._shared.timezones import timezone
-from temporal_airflow.time_provider import get_current_time
+
+# Try to import Temporal time provider, fall back to timezone.utcnow() if not available
+try:
+    from temporal_airflow.time_provider import get_current_time
+except ImportError:
+    # Fallback when temporal_airflow is not installed
+    def get_current_time():
+        return timezone.utcnow()
+
 from airflow.callbacks.callback_requests import DagCallbackRequest, DagRunContext
 from airflow.configuration import conf as airflow_conf
 from airflow.exceptions import AirflowException, NotMapped, TaskNotFound

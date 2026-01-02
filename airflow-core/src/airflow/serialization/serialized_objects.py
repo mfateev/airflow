@@ -77,6 +77,7 @@ from airflow.models.tasklog import LogTemplate
 from airflow.models.xcom import XComModel
 from airflow.models.xcom_arg import SchedulerXComArg, deserialize_xcom_arg
 from airflow.observability.stats import Stats
+from airflow.orchestrators import get_orchestrator
 from airflow.sdk import DAG, Asset, AssetAlias, BaseOperator, XComArg
 from airflow.sdk.bases.operator import OPERATOR_DEFAULTS  # TODO: Copy this into the scheduler?
 from airflow.sdk.definitions._internal.node import DAGNode
@@ -2246,6 +2247,13 @@ def _create_orm_dagrun(
     # create the associated task instances
     # state is None at the moment of creation
     run.verify_integrity(session=session, dag_version_id=dag_version.id)
+
+    # Notify the orchestrator about the new DagRun.
+    # The default orchestrator is a no-op (scheduler picks up the run).
+    # External orchestrators (like Temporal) may start workflows here.
+    orchestrator = get_orchestrator()
+    orchestrator.start_dagrun(run, session)
+
     return run
 
 

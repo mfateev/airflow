@@ -69,7 +69,14 @@ from sqlalchemy_utils import UUIDType
 from airflow import settings
 from airflow._shared.timezones import timezone
 from airflow.assets.manager import asset_manager
-from temporal_airflow.time_provider import get_current_time
+
+# Try to import Temporal time provider, fall back to timezone.utcnow() if not available
+try:
+    from temporal_airflow.time_provider import get_current_time
+except ImportError:
+    def get_current_time():
+        return timezone.utcnow()
+
 from airflow.configuration import conf
 from airflow.listeners.listener import get_listener_manager
 from airflow.models.asset import AssetEvent, AssetModel
