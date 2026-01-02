@@ -1116,12 +1116,24 @@ When a user triggers a DAG (UI, API, CLI, or schedule), Airflow:
 
 **Existing listener hooks** (`on_dag_run_running`, `on_dag_run_success`, etc.) only fire on **state changes**, not on creation. There is no `on_dag_run_created` hook.
 
-### Proposed: Pluggable DagRunOrchestrator
+### Proposed: System-Wide Pluggable Orchestrator
 
-Similar to how Airflow has pluggable executors (`BaseExecutor` → `CeleryExecutor`, `KubernetesExecutor`), we could introduce pluggable orchestrators:
+Similar to how Airflow has a pluggable executor configured system-wide, we introduce a pluggable orchestrator:
+
+```ini
+# airflow.cfg
+[core]
+# System-wide orchestrator selection (like executor)
+orchestrator = TemporalOrchestrator
+# OR: orchestrator = DefaultOrchestrator (current behavior)
+```
+
+**Design principle**: Start simple with system-wide configuration. All DAGs use the same orchestrator. Per-DAG routing can be added later if needed.
+
+### Base Interface
 
 ```python
-# airflow/orchestrators/base_orchestrator.py (~65 lines total)
+# airflow/orchestrators/base_orchestrator.py (~40 lines)
 
 from abc import ABC, abstractmethod
 from airflow.models import DagRun
@@ -1132,7 +1144,9 @@ class BaseDagRunOrchestrator(ABC):
 
     Orchestrators control how DagRuns are executed. The default orchestrator
     uses Airflow's scheduler + executor pattern. Alternative orchestrators
-    can route execution to external systems like Temporal.
+    route execution to external systems like Temporal.
+
+    Configured system-wide via [core] orchestrator setting.
     """
 
     @abstractmethod
@@ -1154,17 +1168,6 @@ class BaseDagRunOrchestrator(ABC):
         """
         pass
 
-    def accepts(self, dag_run: DagRun) -> bool:
-        """
-        Check if this orchestrator should handle the given DagRun.
-
-        Override to implement routing logic (e.g., based on DAG tags,
-        DAG ID patterns, or configuration).
-
-        Returns False by default (orchestrator must opt-in).
-        """
-        return False
-
 
 class DefaultOrchestrator(BaseDagRunOrchestrator):
     """
@@ -1181,10 +1184,6 @@ class DefaultOrchestrator(BaseDagRunOrchestrator):
     def cancel_dagrun(self, dag_run: DagRun) -> None:
         # Mark as failed, scheduler will handle cleanup
         dag_run.set_state(DagRunState.FAILED)
-
-    def accepts(self, dag_run: DagRun) -> bool:
-        # Accept anything not claimed by another orchestrator
-        return True
 ```
 
 ### Temporal Orchestrator Implementation
@@ -1197,14 +1196,14 @@ from temporalio.client import Client
 
 class TemporalOrchestrator(BaseDagRunOrchestrator):
     """
-    Routes DagRun execution to Temporal workflows.
+    Routes ALL DagRun execution to Temporal workflows.
+
+    When configured as the system orchestrator, all DAGs are executed
+    via Temporal instead of the traditional scheduler + executor.
     """
 
     def __init__(self):
         self.client: Client | None = None
-        self.dag_patterns: list[str] = conf.getlist(
-            "temporal", "orchestrated_dags", fallback=[]
-        )
 
     async def start_dagrun(self, dag_run: DagRun) -> None:
         """Start Temporal workflow for this DagRun."""
@@ -1236,25 +1235,25 @@ class TemporalOrchestrator(BaseDagRunOrchestrator):
             f"airflow-{dag_run.dag_id}-{dag_run.run_id}"
         )
         await handle.cancel()
-
-    def accepts(self, dag_run: DagRun) -> bool:
-        """Accept DAGs matching configured patterns or tags."""
-        # Pattern matching
-        for pattern in self.dag_patterns:
-            if fnmatch.fnmatch(dag_run.dag_id, pattern):
-                return True
-
-        # Or check DAG tags
-        dag = dag_run.get_dag()
-        if dag and "temporal" in [t.name for t in dag.tags]:
-            return True
-
-        return False
 ```
 
 ### Integration Point in Airflow
 
-The orchestrator would be invoked when DagRuns are created:
+The orchestrator is loaded once at startup (like executor) and invoked when DagRuns are created:
+
+```python
+# airflow/orchestrators/orchestrator_loader.py
+
+_orchestrator: BaseDagRunOrchestrator | None = None
+
+def get_orchestrator() -> BaseDagRunOrchestrator:
+    """Get the configured orchestrator (singleton)."""
+    global _orchestrator
+    if _orchestrator is None:
+        orchestrator_name = conf.get("core", "orchestrator", fallback="DefaultOrchestrator")
+        _orchestrator = import_string(ORCHESTRATOR_CLASSES[orchestrator_name])()
+    return _orchestrator
+```
 
 ```python
 # airflow/models/dagrun.py (or API layer)
@@ -1264,18 +1263,11 @@ def create_dagrun(...) -> DagRun:
     session.add(dag_run)
     session.flush()
 
-    # NEW: Route to appropriate orchestrator
-    orchestrator = get_orchestrator_for_dagrun(dag_run)
+    # NEW: Start via configured orchestrator
+    orchestrator = get_orchestrator()
     orchestrator.start_dagrun(dag_run)
 
     return dag_run
-
-def get_orchestrator_for_dagrun(dag_run: DagRun) -> BaseDagRunOrchestrator:
-    """Find orchestrator that accepts this DagRun."""
-    for orchestrator in get_configured_orchestrators():
-        if orchestrator.accepts(dag_run):
-            return orchestrator
-    return DefaultOrchestrator()  # Fallback to scheduler-based
 ```
 
 ### Configuration
@@ -1283,37 +1275,51 @@ def get_orchestrator_for_dagrun(dag_run: DagRun) -> BaseDagRunOrchestrator:
 ```ini
 # airflow.cfg
 
-[orchestrators]
-# Comma-separated list of orchestrator classes (checked in order)
-orchestrators = airflow.providers.temporal.orchestrators.TemporalOrchestrator
+[core]
+# System-wide orchestrator (all DAGs use this)
+orchestrator = TemporalOrchestrator
 
 [temporal]
-# DAG patterns to route to Temporal
-orchestrated_dags = etl_*, ml_pipeline_*
-# Or use tags: DAGs with tag "temporal" go to Temporal orchestrator
+# Temporal server address
+host = localhost:7233
+namespace = default
+task_queue = airflow-tasks
 ```
 
-### Benefits of Pluggable Orchestrator
+### Benefits of System-Wide Orchestrator
 
-| Aspect | Current Approach | Pluggable Orchestrator |
-|--------|------------------|------------------------|
-| **UI Integration** | Requires custom trigger service | Works with existing UI |
-| **API Integration** | Requires API modifications | Works with existing API |
-| **CLI Integration** | Requires custom scripts | Works with existing CLI |
-| **Gradual Migration** | External service per DAG | Config-based routing |
-| **Airflow Changes** | ~7 lines | ~100 lines |
-| **Clean Architecture** | External workaround | First-class pattern |
+| Aspect | Current Approach | System-Wide Orchestrator |
+|--------|------------------|--------------------------|
+| **Complexity** | Per-DAG routing logic | Simple: all or nothing |
+| **Configuration** | Patterns, tags, per-DAG | Single config value |
+| **Migration** | Gradual per-DAG | Full cutover |
+| **UI/API/CLI** | Requires workarounds | Works with existing |
+| **Airflow Changes** | ~7 lines (EXTERNAL only) | ~80 lines |
 
 ### Implementation Effort
 
 | Component | Effort | Lines |
 |-----------|--------|-------|
-| `BaseDagRunOrchestrator` interface | Small | ~65 |
-| `DefaultOrchestrator` (current behavior) | Small | ~20 |
-| Integration in DagRun creation | Small | ~15 |
-| `TemporalOrchestrator` provider | Medium | ~100 |
-| Configuration and loading | Small | ~30 |
-| **Total** | **Medium** | **~230 lines** |
+| `BaseDagRunOrchestrator` interface | Small | ~40 |
+| `DefaultOrchestrator` | Small | ~15 |
+| `orchestrator_loader.py` | Small | ~20 |
+| Integration in DagRun creation | Small | ~5 |
+| `TemporalOrchestrator` provider | Small | ~60 |
+| **Total** | **Small** | **~140 lines** |
+
+### Future: Per-DAG Routing
+
+Once the system-wide pattern is established, per-DAG routing can be added later:
+
+```ini
+# Future enhancement
+[core]
+orchestrator = DefaultOrchestrator  # System default
+
+[temporal]
+# Override for specific DAGs (future)
+orchestrated_dags = etl_*, ml_pipeline_*
+```
 
 ### Recommendation
 
@@ -1327,10 +1333,11 @@ orchestrated_dags = etl_*, ml_pipeline_*
 
 **Note**: `DagRunType.EXTERNAL` only prevents scheduler interference - it doesn't provide a hook for starting workflows. That's why an external Trigger Service or API modification is still needed.
 
-**For long-term**: Propose the pluggable orchestrator pattern to the Airflow community. This provides a clean extension point that:
-- Works with existing UI, API, and CLI (no polling, no API changes)
-- Routes DAGs to external orchestrators at creation time
-- Enables any external execution system (Temporal, Prefect, Dagster, custom)
+**For long-term**: Propose the system-wide pluggable orchestrator pattern to the Airflow community. This provides:
+- Clean extension point at DagRun creation
+- Works with existing UI, API, and CLI
+- Simple configuration (one setting)
+- Foundation for per-DAG routing later
 
 ---
 
