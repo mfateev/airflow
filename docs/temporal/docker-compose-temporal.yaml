@@ -20,10 +20,12 @@
 # This docker-compose replaces Airflow's scheduler with Temporal for orchestration.
 # DAG execution is handled by Temporal workflows instead of Airflow's scheduler.
 #
+# IMPORTANT: This requires building an Airflow 3.x image from this repository.
+#
 # Components:
 #   - temporal: Temporal server (workflow orchestration)
 #   - postgres: Database for Airflow metadata (connections, variables, UI state)
-#   - airflow-apiserver: Airflow UI and API
+#   - airflow-webserver: Airflow UI
 #   - airflow-dag-processor: Parses DAG files into serialized_dag table
 #   - temporal-worker: Executes DAGs via Temporal workflows
 #
@@ -33,23 +35,34 @@
 #   - No redis (Temporal replaces the message broker)
 #
 # Usage:
-#   docker-compose -f docker-compose-temporal.yaml up
+#   # From the airflow repository root:
+#   docker build -f docs/temporal/Dockerfile.temporal -t airflow-temporal:latest .
+#
+#   # Create project directory and copy files:
+#   mkdir -p airflow-temporal/dags airflow-temporal/logs airflow-temporal/scripts
+#   cp -r scripts/temporal_airflow airflow-temporal/scripts/
+#   cp docs/temporal/docker-compose-temporal.yaml airflow-temporal/
+#
+#   # Start services:
+#   cd airflow-temporal
+#   docker-compose -f docker-compose-temporal.yaml up -d
 #
 # Access:
-#   - Airflow UI: http://localhost:8080 (admin/airflow)
+#   - Airflow UI: http://localhost:8080 (admin/admin)
 #   - Temporal UI: http://localhost:8233
 #
 ---
 x-airflow-common:
   &airflow-common
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.0}
+  image: ${AIRFLOW_IMAGE_NAME:-airflow-temporal:latest}
   environment:
     &airflow-common-env
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__SCHEDULER__STANDALONE_DAG_PROCESSOR: 'true'
+    AIRFLOW__CORE__EXECUTOR: 'airflow.executors.local_executor.LocalExecutor'
     # Temporal configuration
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
@@ -57,7 +70,6 @@ x-airflow-common:
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
@@ -68,20 +80,20 @@ x-airflow-common:
 
 services:
   # =============================================================================
-  # Temporal Server
+  # Temporal Server (Development Mode)
+  # Uses SQLite storage - data persists across restarts but not for production
+  # For production, use temporalio/auto-setup with PostgreSQL
   # =============================================================================
   temporal:
-    image: temporalio/auto-setup:1.24
+    image: temporalio/admin-tools:latest
     container_name: temporal
     ports:
       - "7233:7233"   # gRPC API
       - "8233:8233"   # Web UI
-    environment:
-      - DB=sqlite
-      - SKIP_SCHEMA_SETUP=false
-      - TEMPORAL_ADDRESS=temporal:7233
+    entrypoint: []
+    command: ["temporal", "server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/tmp/temporal.db"]
     healthcheck:
-      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
       interval: 10s
       timeout: 10s
       start_period: 30s
@@ -118,24 +130,14 @@ services:
       - -c
       - |
         echo "Creating directories..."
-        mkdir -p /opt/airflow/{logs,dags,plugins,scripts}
+        mkdir -p /opt/airflow/{logs,dags,scripts}
 
         echo "Initializing Airflow database..."
         airflow db migrate
 
-        echo "Creating admin user..."
-        airflow users create \
-          --username ${_AIRFLOW_WWW_USER_USERNAME:-airflow} \
-          --password ${_AIRFLOW_WWW_USER_PASSWORD:-airflow} \
-          --firstname Admin \
-          --lastname User \
-          --role Admin \
-          --email admin@example.com || true
-
         echo "Airflow initialization complete!"
     environment:
       <<: *airflow-common-env
-    user: "0:0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -146,7 +148,7 @@ services:
   airflow-apiserver:
     <<: *airflow-common
     container_name: airflow-apiserver
-    command: api-server
+    command: ["airflow", "api-server"]
     ports:
       - "8080:8080"
     healthcheck:
@@ -167,7 +169,7 @@ services:
   airflow-dag-processor:
     <<: *airflow-common
     container_name: airflow-dag-processor
-    command: dag-processor
+    command: ["airflow", "dag-processor"]
     healthcheck:
       test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
       interval: 30s
@@ -186,7 +188,11 @@ services:
   temporal-worker:
     <<: *airflow-common
     container_name: temporal-worker
-    command: python /opt/airflow/scripts/temporal_airflow/deep_worker.py
+    command:
+      - bash
+      - -c
+      - |
+        pip install --quiet temporalio && python /opt/airflow/scripts/temporal_airflow/deep_worker.py
     environment:
       <<: *airflow-common-env
       PYTHONPATH: /opt/airflow/scripts
@@ -195,7 +201,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 120s
     restart: always
     depends_on:
       airflow-init:

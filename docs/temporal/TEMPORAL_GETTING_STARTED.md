@@ -6,29 +6,35 @@ This guide shows how to run Airflow DAGs using Temporal for orchestration instea
 
 - Docker and Docker Compose
 - 4GB+ RAM available for Docker
+- Clone of the Apache Airflow repository (this is Airflow 3.x with Temporal support)
 
 ## Quick Start
 
-### 1. Create Project Directory
+### 1. Build the Airflow-Temporal Image
+
+From the Airflow repository root, build the Docker image:
 
 ```bash
-mkdir airflow-temporal && cd airflow-temporal
-mkdir -p dags logs plugins scripts
+cd /path/to/airflow
+docker build -f docs/temporal/Dockerfile.temporal -t airflow-temporal:latest .
 ```
 
-### 2. Download Docker Compose File
+This builds an Airflow 3.x image with Temporal SDK pre-installed.
+
+### 2. Create Project Directory
 
 ```bash
-curl -LfO 'https://raw.githubusercontent.com/apache/airflow/main/docs/temporal/docker-compose-temporal.yaml'
+mkdir -p airflow-temporal/dags airflow-temporal/logs airflow-temporal/scripts
+cd airflow-temporal
 ```
 
-Or copy `docker-compose-temporal.yaml` from this repository.
-
-### 3. Copy Temporal Worker Scripts
-
-Copy the `temporal_airflow` directory to your scripts folder:
+### 3. Copy Required Files
 
 ```bash
+# Copy docker-compose file
+cp /path/to/airflow/docs/temporal/docker-compose-temporal.yaml .
+
+# Copy Temporal worker scripts
 cp -r /path/to/airflow/scripts/temporal_airflow scripts/
 ```
 
@@ -76,7 +82,7 @@ docker-compose -f docker-compose-temporal.yaml ps
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| Airflow UI | http://localhost:8080 | airflow / airflow |
+| Airflow UI | http://localhost:8080 | admin / admin |
 | Temporal UI | http://localhost:8233 | (none required) |
 
 ## How It Works
@@ -127,7 +133,7 @@ docker-compose -f docker-compose-temporal.yaml ps
 |-----------|------|
 | **Temporal Server** | Orchestrates workflow execution, handles retries, maintains durable state |
 | **PostgreSQL** | Stores Airflow metadata (serialized DAGs, connections, dag_run state for UI) |
-| **Airflow API Server** | Provides Airflow UI for monitoring and triggering DAGs |
+| **Airflow Webserver** | Provides Airflow UI for monitoring and triggering DAGs |
 | **DAG Processor** | Parses DAG files and stores serialized DAGs in database |
 | **Temporal Worker** | Executes DAGs via `ExecuteAirflowDagDeepWorkflow` |
 
@@ -151,7 +157,7 @@ docker-compose -f docker-compose-temporal.yaml ps
 ### Via Airflow CLI
 
 ```bash
-docker-compose -f docker-compose-temporal.yaml exec airflow-apiserver \
+docker-compose -f docker-compose-temporal.yaml exec airflow-webserver \
   airflow dags trigger example_dag
 ```
 
@@ -193,8 +199,8 @@ Set these in your `.env` file or docker-compose:
 ```bash
 # Airflow
 AIRFLOW_UID=50000
-_AIRFLOW_WWW_USER_USERNAME=airflow
-_AIRFLOW_WWW_USER_PASSWORD=airflow
+_AIRFLOW_WWW_USER_USERNAME=admin
+_AIRFLOW_WWW_USER_PASSWORD=admin
 
 # Temporal
 TEMPORAL_ADDRESS=temporal:7233
@@ -205,7 +211,7 @@ TEMPORAL_TASK_QUEUE=airflow-tasks
 ### Adding Connections
 
 ```bash
-docker-compose -f docker-compose-temporal.yaml exec airflow-apiserver \
+docker-compose -f docker-compose-temporal.yaml exec airflow-webserver \
   airflow connections add 'postgres_default' \
     --conn-type 'postgres' \
     --conn-host 'postgres' \
@@ -217,7 +223,7 @@ docker-compose -f docker-compose-temporal.yaml exec airflow-apiserver \
 ### Adding Variables
 
 ```bash
-docker-compose -f docker-compose-temporal.yaml exec airflow-apiserver \
+docker-compose -f docker-compose-temporal.yaml exec airflow-webserver \
   airflow variables set my_variable "my_value"
 ```
 
@@ -265,7 +271,7 @@ docker-compose -f docker-compose-temporal.yaml exec temporal temporal operator c
 docker-compose -f docker-compose-temporal.yaml logs airflow-dag-processor
 
 # Verify DAG syntax
-docker-compose -f docker-compose-temporal.yaml exec airflow-apiserver \
+docker-compose -f docker-compose-temporal.yaml exec airflow-webserver \
   python -c "from airflow.models import DagBag; db = DagBag('/opt/airflow/dags'); print(db.import_errors)"
 ```
 

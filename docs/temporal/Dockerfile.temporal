@@ -1,0 +1,71 @@
+# Simple Dockerfile for Airflow with Temporal support
+# Builds directly from local sources
+#
+# Build from repo root:
+#   docker build -f docs/temporal/Dockerfile.temporal -t airflow-temporal:latest .
+
+FROM python:3.12-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create airflow user
+RUN useradd -ms /bin/bash -d /opt/airflow -u 50000 airflow
+
+WORKDIR /opt/airflow
+
+# Copy and install shared packages first (they're dependencies)
+COPY --chown=airflow:0 shared /opt/airflow/shared
+
+# Copy and install task-sdk
+COPY --chown=airflow:0 task-sdk /opt/airflow/task-sdk
+
+# Copy airflow-core
+COPY --chown=airflow:0 airflow-core /opt/airflow/airflow-core
+
+# Copy temporal scripts
+COPY --chown=airflow:0 scripts/temporal_airflow /opt/airflow/scripts/temporal_airflow
+
+# Install hatchling first (needed for editable installs)
+RUN pip install --no-cache-dir hatchling hatch-vcs editables
+
+# Install local packages as editable with --no-build-isolation
+# Install both at once so pip can resolve the interdependency
+RUN pip install --no-cache-dir --no-build-isolation \
+    -e /opt/airflow/task-sdk \
+    -e /opt/airflow/airflow-core
+
+# Install runtime dependencies
+RUN pip install --no-cache-dir temporalio psycopg2-binary asyncpg \
+    flask flask-appbuilder sqlalchemy pendulum gunicorn \
+    pydantic fastapi uvicorn structlog croniter
+
+# CRITICAL: Remove conflicting PyPI apache-airflow package that shadows our local code
+# The providers pull in apache-airflow>=2.11.0 which installs into site-packages and
+# shadows our editable airflow-core install. Uninstalling it allows our local code
+# to be used while keeping the providers' other dependencies.
+# Then force reinstall our local packages to regenerate console scripts.
+RUN pip uninstall -y apache-airflow 2>/dev/null || true && \
+    pip install --no-cache-dir --no-build-isolation --force-reinstall --no-deps \
+    -e /opt/airflow/task-sdk \
+    -e /opt/airflow/airflow-core
+
+# Set environment
+ENV AIRFLOW_HOME=/opt/airflow
+ENV PYTHONPATH=/opt/airflow/scripts
+
+# Switch to airflow user
+USER airflow
+
+# Create necessary directories
+RUN mkdir -p /opt/airflow/{dags,logs,plugins}
+
+EXPOSE 8080
+
+# Default command
+CMD ["airflow", "version"]
