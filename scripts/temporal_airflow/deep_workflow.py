@@ -403,6 +403,8 @@ class ExecuteAirflowDagDeepWorkflow:
                         ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
 
                         # DEEP INTEGRATION: Sync QUEUED state to real Airflow DB
+                        # In Airflow 3.x, ti.state may be None after schedule_tis
+                        ti_state = ti.state.value if ti.state is not None else "queued"
                         await workflow.execute_activity(
                             sync_task_status,
                             TaskStatusSync(
@@ -410,7 +412,7 @@ class ExecuteAirflowDagDeepWorkflow:
                                 task_id=ti.task_id,
                                 run_id=self.run_id,
                                 map_index=ti.map_index,
-                                state=ti.state.value,
+                                state=ti_state,
                                 start_date=workflow.now(),
                             ),
                             start_to_close_timeout=timedelta(seconds=30),

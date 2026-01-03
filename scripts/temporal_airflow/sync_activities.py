@@ -97,6 +97,9 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
             )
 
         # Create DagRun with EXTERNAL type and RUNNING state
+        # In Airflow 3.x, use data_interval instead of data_interval_start/end
+        from airflow.timetables.base import DataInterval
+
         dag_run = DagRun(
             dag_id=input.dag_id,
             run_id=run_id,
@@ -104,8 +107,7 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
             run_type=DagRunType.EXTERNAL,
             state=DagRunState.RUNNING,
             conf=input.conf,
-            data_interval_start=input.logical_date,  # Simple interval for now
-            data_interval_end=input.logical_date,
+            data_interval=DataInterval(start=input.logical_date, end=input.logical_date),
         )
         session.add(dag_run)
         session.flush()  # Get ID before creating TaskInstances
@@ -116,7 +118,9 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
 
         # Create TaskInstance records for all tasks
         # Use verify_integrity which handles TaskInstance creation
-        dag_run.verify_integrity(session=session)
+        # In Airflow 3.x, dag_version_id is required and DAG object must be set
+        dag_run.dag = serialized.dag
+        dag_run.verify_integrity(session=session, dag_version_id=serialized.dag_version_id)
         session.commit()
 
         activity.logger.info(
@@ -256,12 +260,18 @@ async def load_serialized_dag(input: LoadSerializedDagInput) -> LoadSerializedDa
                 non_retryable=True,
             )
 
+        # In Airflow 3.x, fileloc is in dag_model or data['dag']['fileloc']
+        fileloc = (
+            serialized.dag_model.fileloc
+            if serialized.dag_model
+            else serialized.data.get("dag", {}).get("fileloc", "")
+        )
         activity.logger.info(
-            f"Loaded serialized DAG: {input.dag_id} (fileloc={serialized.fileloc})"
+            f"Loaded serialized DAG: {input.dag_id} (fileloc={fileloc})"
         )
         return LoadSerializedDagResult(
             dag_data=serialized.data,
-            fileloc=serialized.fileloc,
+            fileloc=fileloc,
         )
 
 
@@ -294,8 +304,18 @@ async def ensure_task_instances(input: EnsureTaskInstancesInput) -> None:
                 non_retryable=True,
             )
 
+        # Get serialized DAG to get dag_version_id (required in Airflow 3.x)
+        serialized = SerializedDagModel.get(input.dag_id, session=session)
+        if not serialized:
+            raise ApplicationError(
+                f"DAG {input.dag_id} not found in SerializedDagModel",
+                non_retryable=True,
+            )
+
         # verify_integrity creates TaskInstance records
-        dag_run.verify_integrity(session=session)
+        # In Airflow 3.x, dag_version_id is required and DAG object must be set
+        dag_run.dag = serialized.dag
+        dag_run.verify_integrity(session=session, dag_version_id=serialized.dag_version_id)
         session.commit()
 
         activity.logger.info(

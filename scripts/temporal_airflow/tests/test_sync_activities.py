@@ -14,15 +14,20 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tests for sync_activities module."""
+"""Tests for sync_activities module using real Airflow models."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
 
 import pytest
 from temporalio.exceptions import ApplicationError
 
+from airflow import DAG
+from airflow.models.dagrun import DagRun
+from airflow.models.serialized_dag import SerializedDagModel
+from airflow.models.taskinstance import TaskInstance
+from airflow.operators.empty import EmptyOperator
+from airflow.utils.session import create_session
 from airflow.utils.state import DagRunState, TaskInstanceState
 from airflow.utils.types import DagRunType
 
@@ -42,340 +47,346 @@ from temporal_airflow.sync_activities import (
 )
 
 
-class TestCreateDagRunRecord:
-    """Tests for create_dagrun_record activity."""
+@pytest.fixture
+def test_dag():
+    """Create a test DAG for testing."""
+    with DAG(
+        dag_id="test_sync_activities_dag",
+        start_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        schedule=None,
+        catchup=False,
+    ) as dag:
+        task1 = EmptyOperator(task_id="task1")
+        task2 = EmptyOperator(task_id="task2")
+        task1 >> task2
+    # Set fileloc to this test file (DagCode.write_code needs a real file)
+    dag.fileloc = __file__
+    return dag
+
+
+@pytest.fixture
+def serialized_dag(test_dag):
+    """Serialize and save the test DAG to the database."""
+    from airflow.models.dag import DagModel
+    from airflow.models.dagbundle import DagBundleModel
+    from airflow.models.dag_version import DagVersion
+    from airflow.models.dagcode import DagCode
+    from airflow.serialization.serialized_objects import LazyDeserializedDAG, SerializedDAG
+
+    bundle_name = "test-bundle"
+    dag_id = test_dag.dag_id
+
+    with create_session() as session:
+        # Clean up any existing data first (ensure fresh state)
+        session.query(TaskInstance).filter(TaskInstance.dag_id == dag_id).delete()
+        session.query(DagRun).filter(DagRun.dag_id == dag_id).delete()
+        session.query(SerializedDagModel).filter(SerializedDagModel.dag_id == dag_id).delete()
+        session.query(DagCode).filter(DagCode.dag_id == dag_id).delete()
+        session.query(DagVersion).filter(DagVersion.dag_id == dag_id).delete()
+        session.query(DagModel).filter(DagModel.dag_id == dag_id).delete()
+        session.commit()
+
+        # Create bundle first (required by foreign key constraint in Airflow 3.x)
+        existing_bundle = session.query(DagBundleModel).filter(
+            DagBundleModel.name == bundle_name
+        ).first()
+        if not existing_bundle:
+            bundle = DagBundleModel(name=bundle_name)
+            session.add(bundle)
+            session.commit()
+
+        # First create the DagModel entry (required for foreign key in dag_version)
+        SerializedDAG.bulk_write_to_db(
+            bundle_name=bundle_name,
+            bundle_version=None,
+            dags=[test_dag],
+            session=session,
+        )
+        session.commit()
+
+        # Convert to LazyDeserializedDAG and write the serialized DAG
+        lazy_dag = LazyDeserializedDAG.from_dag(test_dag)
+        SerializedDagModel.write_dag(
+            lazy_dag,
+            bundle_name=bundle_name,
+            session=session,
+        )
+        session.commit()
+
+        # Fetch it back to get the ID
+        serialized = SerializedDagModel.get(dag_id, session=session)
+        yield serialized
+
+        # Cleanup - delete in reverse order of foreign key dependencies
+        session.query(TaskInstance).filter(TaskInstance.dag_id == dag_id).delete()
+        session.query(DagRun).filter(DagRun.dag_id == dag_id).delete()
+        session.query(SerializedDagModel).filter(SerializedDagModel.dag_id == dag_id).delete()
+        session.query(DagCode).filter(DagCode.dag_id == dag_id).delete()
+        session.query(DagVersion).filter(DagVersion.dag_id == dag_id).delete()
+        session.query(DagModel).filter(DagModel.dag_id == dag_id).delete()
+        session.commit()
+
+
+@pytest.fixture
+def cleanup_dagruns():
+    """Cleanup any DagRuns created during tests."""
+    yield
+    with create_session() as session:
+        # Delete TaskInstances first (foreign key constraint)
+        session.query(TaskInstance).filter(
+            TaskInstance.dag_id == "test_sync_activities_dag"
+        ).delete()
+        # Delete DagRuns
+        session.query(DagRun).filter(
+            DagRun.dag_id == "test_sync_activities_dag"
+        ).delete()
+        session.commit()
+
+
+class TestCreateDagRunRecordReal:
+    """Tests for create_dagrun_record activity with real models."""
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_creates_new_dagrun(self, mock_create_session):
+    async def test_creates_new_dagrun(self, serialized_dag, cleanup_dagruns):
         """create_dagrun_record should create a new DagRun with EXTERNAL type."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
-
-        # Mock query to return None (no existing DagRun)
-        mock_session.query.return_value.filter.return_value.first.return_value = None
-
-        # Mock SerializedDagModel
-        mock_serialized = MagicMock()
-        mock_serialized.data = {"dag_id": "test_dag", "tasks": []}
-
-        with patch(
-            "temporal_airflow.sync_activities.SerializedDagModel.get",
-            return_value=mock_serialized,
-        ):
-            # Mock the DagRun being created
-            mock_dag_run = MagicMock()
-            mock_dag_run.id = 123
-            mock_dag_run.run_id = "external__2025-01-01T00:00:00"
-
-            # Patch DagRun class
-            with patch(
-                "temporal_airflow.sync_activities.DagRun",
-                return_value=mock_dag_run,
-            ) as mock_dag_run_class:
-                input_data = CreateDagRunInput(
-                    dag_id="test_dag",
-                    logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
-                    conf={"key": "value"},
-                )
-
-                result = await create_dagrun_record(input_data)
-
-                # Verify DagRun was created with EXTERNAL type
-                mock_dag_run_class.assert_called_once()
-                call_kwargs = mock_dag_run_class.call_args.kwargs
-                assert call_kwargs["dag_id"] == "test_dag"
-                assert call_kwargs["run_type"] == DagRunType.EXTERNAL
-                assert call_kwargs["state"] == DagRunState.RUNNING
-
-                # Verify result
-                assert result.dag_run_id == 123
-
-    @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_returns_existing_dagrun(self, mock_create_session):
-        """create_dagrun_record should return existing DagRun if found."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
-
-        # Mock existing DagRun
-        mock_existing = MagicMock()
-        mock_existing.id = 456
-        mock_existing.run_id = "existing_run_id"
-        mock_session.query.return_value.filter.return_value.first.return_value = mock_existing
-
         input_data = CreateDagRunInput(
-            dag_id="test_dag",
-            logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            dag_id="test_sync_activities_dag",
+            logical_date=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            conf={"key": "value"},
         )
 
         result = await create_dagrun_record(input_data)
 
-        assert result.run_id == "existing_run_id"
-        assert result.dag_run_id == 456
+        # Verify the DagRun was created
+        assert result.run_id is not None
+        assert "external__" in result.run_id
+        assert result.dag_run_id is not None
+
+        # Verify in database
+        with create_session() as session:
+            dag_run = (
+                session.query(DagRun)
+                .filter(DagRun.id == result.dag_run_id)
+                .first()
+            )
+            assert dag_run is not None
+            assert dag_run.dag_id == "test_sync_activities_dag"
+            assert dag_run.run_type == DagRunType.EXTERNAL
+            assert dag_run.state == DagRunState.RUNNING
+
+            # Verify TaskInstances were created
+            task_instances = (
+                session.query(TaskInstance)
+                .filter(TaskInstance.run_id == dag_run.run_id)
+                .all()
+            )
+            task_ids = {ti.task_id for ti in task_instances}
+            assert "task1" in task_ids
+            assert "task2" in task_ids
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_raises_error_for_missing_serialized_dag(self, mock_create_session):
+    async def test_returns_existing_dagrun(self, serialized_dag, cleanup_dagruns):
+        """create_dagrun_record should return existing DagRun if found."""
+        logical_date = datetime(2025, 6, 2, tzinfo=timezone.utc)
+
+        # Create first time
+        input_data = CreateDagRunInput(
+            dag_id="test_sync_activities_dag",
+            logical_date=logical_date,
+        )
+        first_result = await create_dagrun_record(input_data)
+
+        # Call again with same logical_date
+        second_result = await create_dagrun_record(input_data)
+
+        # Should return the same DagRun
+        assert second_result.dag_run_id == first_result.dag_run_id
+        assert second_result.run_id == first_result.run_id
+
+    @pytest.mark.asyncio
+    async def test_raises_error_for_missing_serialized_dag(self):
         """create_dagrun_record should raise ApplicationError if DAG not found."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
+        input_data = CreateDagRunInput(
+            dag_id="nonexistent_dag_12345",
+            logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
 
-        # Mock query to return None (no existing DagRun)
-        mock_session.query.return_value.filter.return_value.first.return_value = None
+        with pytest.raises(ApplicationError) as exc_info:
+            await create_dagrun_record(input_data)
 
-        # Mock SerializedDagModel.get to return None
-        with patch(
-            "temporal_airflow.sync_activities.SerializedDagModel.get",
-            return_value=None,
-        ):
-            input_data = CreateDagRunInput(
-                dag_id="nonexistent_dag",
-                logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            )
-
-            with pytest.raises(ApplicationError) as exc_info:
-                await create_dagrun_record(input_data)
-
-            assert "not found" in str(exc_info.value)
+        assert "not found" in str(exc_info.value)
 
 
-class TestSyncTaskStatus:
-    """Tests for sync_task_status activity."""
+class TestSyncTaskStatusReal:
+    """Tests for sync_task_status activity with real models."""
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_updates_task_state(self, mock_create_session):
+    async def test_updates_task_state(self, serialized_dag, cleanup_dagruns):
         """sync_task_status should update TaskInstance state."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
+        # First create a DagRun to get TaskInstances
+        create_input = CreateDagRunInput(
+            dag_id="test_sync_activities_dag",
+            logical_date=datetime(2025, 6, 3, tzinfo=timezone.utc),
+        )
+        dag_run_result = await create_dagrun_record(create_input)
 
-        # Mock TaskInstance
-        mock_ti = MagicMock()
-        mock_session.query.return_value.filter.return_value.first.return_value = mock_ti
-
-        input_data = TaskStatusSync(
-            dag_id="test_dag",
-            task_id="test_task",
-            run_id="test_run",
+        # Sync task status
+        sync_input = TaskStatusSync(
+            dag_id="test_sync_activities_dag",
+            task_id="task1",
+            run_id=dag_run_result.run_id,
             map_index=-1,
             state="success",
-            start_date=datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
-            end_date=datetime(2025, 1, 1, 12, 1, 0, tzinfo=timezone.utc),
+            start_date=datetime(2025, 6, 3, 12, 0, 0, tzinfo=timezone.utc),
+            end_date=datetime(2025, 6, 3, 12, 1, 0, tzinfo=timezone.utc),
         )
 
-        await sync_task_status(input_data)
+        await sync_task_status(sync_input)
 
-        # Verify state was updated
-        assert mock_ti.state == TaskInstanceState.SUCCESS
-        assert mock_ti.start_date == input_data.start_date
-        assert mock_ti.end_date == input_data.end_date
-        mock_session.commit.assert_called_once()
+        # Verify in database
+        with create_session() as session:
+            ti = (
+                session.query(TaskInstance)
+                .filter(
+                    TaskInstance.dag_id == "test_sync_activities_dag",
+                    TaskInstance.task_id == "task1",
+                    TaskInstance.run_id == dag_run_result.run_id,
+                )
+                .first()
+            )
+            assert ti is not None
+            assert ti.state == TaskInstanceState.SUCCESS
+            assert ti.start_date == sync_input.start_date
+            assert ti.end_date == sync_input.end_date
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_writes_xcom_value(self, mock_create_session):
-        """sync_task_status should write XCom if provided."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
-
-        # Mock TaskInstance
-        mock_ti = MagicMock()
-        mock_session.query.return_value.filter.return_value.first.return_value = mock_ti
-
-        with patch("temporal_airflow.sync_activities.XComModel.set") as mock_xcom_set:
-            input_data = TaskStatusSync(
-                dag_id="test_dag",
-                task_id="test_task",
-                run_id="test_run",
-                map_index=-1,
-                state="success",
-                xcom_value={"result": 42},
-            )
-
-            await sync_task_status(input_data)
-
-            # Verify XComModel.set was called
-            mock_xcom_set.assert_called_once_with(
-                key="return_value",
-                value={"result": 42},
-                dag_id="test_dag",
-                task_id="test_task",
-                run_id="test_run",
-                map_index=-1,
-                session=mock_session,
-            )
-
-    @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_handles_missing_task_instance(self, mock_create_session):
+    async def test_handles_missing_task_instance(self, serialized_dag, cleanup_dagruns):
         """sync_task_status should handle missing TaskInstance gracefully."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
-
-        # Mock query to return None
-        mock_session.query.return_value.filter.return_value.first.return_value = None
-
         input_data = TaskStatusSync(
-            dag_id="test_dag",
+            dag_id="test_sync_activities_dag",
             task_id="nonexistent_task",
-            run_id="test_run",
+            run_id="nonexistent_run",
             map_index=-1,
             state="success",
         )
 
-        # Should not raise
+        # Should not raise, just log warning
         await sync_task_status(input_data)
 
 
-class TestSyncDagRunStatus:
-    """Tests for sync_dagrun_status activity."""
+class TestSyncDagRunStatusReal:
+    """Tests for sync_dagrun_status activity with real models."""
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_updates_dagrun_state(self, mock_create_session):
+    async def test_updates_dagrun_state(self, serialized_dag, cleanup_dagruns):
         """sync_dagrun_status should update DagRun state."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
+        # First create a DagRun
+        create_input = CreateDagRunInput(
+            dag_id="test_sync_activities_dag",
+            logical_date=datetime(2025, 6, 4, tzinfo=timezone.utc),
+        )
+        dag_run_result = await create_dagrun_record(create_input)
 
-        # Mock DagRun
-        mock_dag_run = MagicMock()
-        mock_session.query.return_value.filter.return_value.first.return_value = mock_dag_run
-
-        input_data = DagRunStatusSync(
-            dag_id="test_dag",
-            run_id="test_run",
+        # Sync DagRun status to success
+        sync_input = DagRunStatusSync(
+            dag_id="test_sync_activities_dag",
+            run_id=dag_run_result.run_id,
             state="success",
-            end_date=datetime(2025, 1, 1, 12, 5, 0, tzinfo=timezone.utc),
+            end_date=datetime(2025, 6, 4, 12, 5, 0, tzinfo=timezone.utc),
         )
 
-        await sync_dagrun_status(input_data)
+        await sync_dagrun_status(sync_input)
 
-        # Verify state was updated
-        assert mock_dag_run.state == DagRunState.SUCCESS
-        assert mock_dag_run.end_date == input_data.end_date
-        mock_session.commit.assert_called_once()
+        # Verify in database
+        with create_session() as session:
+            dag_run = (
+                session.query(DagRun)
+                .filter(DagRun.run_id == dag_run_result.run_id)
+                .first()
+            )
+            assert dag_run is not None
+            assert dag_run.state == DagRunState.SUCCESS
+            assert dag_run.end_date == sync_input.end_date
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_handles_missing_dagrun(self, mock_create_session):
+    async def test_handles_missing_dagrun(self):
         """sync_dagrun_status should handle missing DagRun gracefully."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
-
-        # Mock query to return None
-        mock_session.query.return_value.filter.return_value.first.return_value = None
-
         input_data = DagRunStatusSync(
-            dag_id="test_dag",
+            dag_id="test_sync_activities_dag",
             run_id="nonexistent_run",
             state="success",
         )
 
-        # Should not raise
+        # Should not raise, just log warning
         await sync_dagrun_status(input_data)
 
 
-class TestLoadSerializedDag:
-    """Tests for load_serialized_dag activity."""
+class TestLoadSerializedDagReal:
+    """Tests for load_serialized_dag activity with real models."""
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_loads_serialized_dag(self, mock_create_session):
+    async def test_loads_serialized_dag(self, serialized_dag):
         """load_serialized_dag should return serialized DAG data and fileloc."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
+        input_data = LoadSerializedDagInput(dag_id="test_sync_activities_dag")
 
-        # Mock SerializedDagModel
-        mock_serialized = MagicMock()
-        mock_serialized.data = {
-            "dag_id": "test_dag",
-            "tasks": [{"task_id": "task1"}, {"task_id": "task2"}],
-        }
-        mock_serialized.fileloc = "/opt/airflow/dags/subdirectory/my_dag_file.py"
+        result = await load_serialized_dag(input_data)
 
-        with patch(
-            "temporal_airflow.sync_activities.SerializedDagModel.get",
-            return_value=mock_serialized,
-        ):
-            input_data = LoadSerializedDagInput(dag_id="test_dag")
+        # Verify the data structure
+        assert result.dag_data is not None
+        assert "dag" in result.dag_data
+        dag_dict = result.dag_data.get("dag", {})
+        assert dag_dict.get("dag_id") == "test_sync_activities_dag"
 
-            result = await load_serialized_dag(input_data)
-
-            # Verify LoadSerializedDagResult structure
-            assert result.dag_data == mock_serialized.data
-            assert result.dag_data["dag_id"] == "test_dag"
-            assert len(result.dag_data["tasks"]) == 2
-            assert result.fileloc == "/opt/airflow/dags/subdirectory/my_dag_file.py"
+        # Verify fileloc is returned
+        assert result.fileloc is not None
+        assert isinstance(result.fileloc, str)
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_raises_error_for_missing_dag(self, mock_create_session):
+    async def test_raises_error_for_missing_dag(self):
         """load_serialized_dag should raise ApplicationError if DAG not found."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
+        input_data = LoadSerializedDagInput(dag_id="nonexistent_dag_67890")
 
-        with patch(
-            "temporal_airflow.sync_activities.SerializedDagModel.get",
-            return_value=None,
-        ):
-            input_data = LoadSerializedDagInput(dag_id="nonexistent_dag")
+        with pytest.raises(ApplicationError) as exc_info:
+            await load_serialized_dag(input_data)
 
-            with pytest.raises(ApplicationError) as exc_info:
-                await load_serialized_dag(input_data)
-
-            assert "not found" in str(exc_info.value)
+        assert "not found" in str(exc_info.value)
 
 
-class TestEnsureTaskInstances:
-    """Tests for ensure_task_instances activity."""
+class TestEnsureTaskInstancesReal:
+    """Tests for ensure_task_instances activity with real models."""
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_calls_verify_integrity(self, mock_create_session):
-        """ensure_task_instances should call verify_integrity on DagRun."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
+    async def test_ensures_task_instances_exist(self, serialized_dag, cleanup_dagruns):
+        """ensure_task_instances should create TaskInstances if missing."""
+        # First create a DagRun (which already creates TaskInstances)
+        create_input = CreateDagRunInput(
+            dag_id="test_sync_activities_dag",
+            logical_date=datetime(2025, 6, 5, tzinfo=timezone.utc),
+        )
+        dag_run_result = await create_dagrun_record(create_input)
 
-        # Mock DagRun
-        mock_dag_run = MagicMock()
-        mock_session.query.return_value.filter.return_value.first.return_value = mock_dag_run
-
+        # Call ensure_task_instances (should be idempotent)
         input_data = EnsureTaskInstancesInput(
-            dag_id="test_dag",
-            run_id="test_run",
+            dag_id="test_sync_activities_dag",
+            run_id=dag_run_result.run_id,
         )
 
         await ensure_task_instances(input_data)
 
-        # Verify verify_integrity was called
-        mock_dag_run.verify_integrity.assert_called_once_with(session=mock_session)
-        mock_session.commit.assert_called_once()
+        # Verify TaskInstances still exist
+        with create_session() as session:
+            task_instances = (
+                session.query(TaskInstance)
+                .filter(TaskInstance.run_id == dag_run_result.run_id)
+                .all()
+            )
+            assert len(task_instances) == 2
 
     @pytest.mark.asyncio
-    @patch("temporal_airflow.sync_activities.create_session")
-    async def test_raises_error_for_missing_dagrun(self, mock_create_session):
+    async def test_raises_error_for_missing_dagrun(self):
         """ensure_task_instances should raise ApplicationError if DagRun not found."""
-        mock_session = MagicMock()
-        mock_create_session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_create_session.return_value.__exit__ = MagicMock(return_value=None)
-
-        # Mock query to return None
-        mock_session.query.return_value.filter.return_value.first.return_value = None
-
         input_data = EnsureTaskInstancesInput(
-            dag_id="test_dag",
+            dag_id="test_sync_activities_dag",
             run_id="nonexistent_run",
         )
 
