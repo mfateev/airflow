@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from temporalio.client import Client
@@ -94,9 +95,11 @@ class TemporalOrchestrator(BaseDagRunOrchestrator):
 
         # Build workflow input for deep integration
         # Note: No serialized_dag passed - workflow loads it via activity
+        # Manual triggers in Airflow 3.x may have logical_date=None
+        logical_date = dag_run.logical_date or datetime.now(timezone.utc)
         workflow_input = DeepDagExecutionInput(
             dag_id=dag_run.dag_id,
-            logical_date=dag_run.logical_date,
+            logical_date=logical_date,
             run_id=dag_run.run_id,  # Pass existing run_id
             conf=dag_run.conf or {},
         )
