@@ -144,6 +144,7 @@ services:
 
   # =============================================================================
   # Airflow API Server (UI)
+  # Handles UI, REST API, and routes DagRuns to Temporal via orchestrator
   # =============================================================================
   airflow-apiserver:
     <<: *airflow-common
@@ -151,6 +152,11 @@ services:
     command: ["airflow", "api-server"]
     ports:
       - "8080:8080"
+    environment:
+      <<: *airflow-common-env
+      # Route all DagRuns to Temporal instead of default executor
+      AIRFLOW__CORE__ORCHESTRATOR: temporal_airflow.orchestrator.TemporalOrchestrator
+      PYTHONPATH: /opt/airflow/scripts
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
@@ -161,6 +167,8 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
 
   # =============================================================================
   # Airflow DAG Processor
@@ -180,6 +188,33 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+
+  # =============================================================================
+  # Airflow Scheduler (OPTIONAL - only for timetable-based scheduling)
+  # Evaluates DAG timetables and creates scheduled DagRuns.
+  # NOT needed for manual triggers (UI/CLI/API) - those go through api-server.
+  # =============================================================================
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: ["airflow", "scheduler"]
+    environment:
+      <<: *airflow-common-env
+      # Route all DagRuns to Temporal instead of default executor
+      AIRFLOW__CORE__ORCHESTRATOR: temporal_airflow.orchestrator.TemporalOrchestrator
+      PYTHONPATH: /opt/airflow/scripts
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
 
   # =============================================================================
   # Temporal Worker for Airflow DAG Execution
