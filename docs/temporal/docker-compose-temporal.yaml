@@ -63,6 +63,8 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__SCHEDULER__STANDALONE_DAG_PROCESSOR: 'true'
     AIRFLOW__CORE__EXECUTOR: 'airflow.executors.local_executor.LocalExecutor'
+    # Auth configuration (bypass login for dev)
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: 'true'
     # Temporal configuration
     TEMPORAL_ADDRESS: temporal:7233
     TEMPORAL_NAMESPACE: default
