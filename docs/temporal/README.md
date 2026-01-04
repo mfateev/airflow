@@ -102,8 +102,15 @@ docker-compose -f docker-compose-temporal.yaml ps
 
 ### Step 5: Access the UIs
 
-- **Airflow UI**: http://localhost:8080 (no login required in dev mode)
+- **Airflow UI**: http://localhost:8080
 - **Temporal UI**: http://localhost:8233
+
+**Login credentials:** The Simple Auth Manager auto-generates passwords on first startup.
+```bash
+# Get the admin password
+docker exec airflow-apiserver cat /opt/airflow/simple_auth_manager_passwords.json.generated
+```
+Username: `admin`, password: value from the JSON output above.
 
 ## Triggering DAGs
 
