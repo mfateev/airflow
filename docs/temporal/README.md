@@ -57,10 +57,9 @@ cd ~/airflow-temporal
 # Copy required files
 cp /path/to/airflow/docs/temporal/docker-compose-temporal.yaml .
 cp -r /path/to/airflow/scripts/temporal_airflow scripts/
-
-# Set permissions (needed for mounted volumes)
-echo "AIRFLOW_UID=$(id -u)" > .env
 ```
+
+**Note:** Do NOT set `AIRFLOW_UID` to your local user ID. The container must run as user 50000 (the airflow user) for the Python installation to work correctly.
 
 ### Step 3: Create a Sample DAG
 
