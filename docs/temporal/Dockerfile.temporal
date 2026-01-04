@@ -33,6 +33,11 @@ COPY --chown=airflow:0 airflow-core /opt/airflow/airflow-core
 # Build the Airflow UI (React app)
 WORKDIR /opt/airflow/airflow-core/src/airflow/ui
 RUN npm install --legacy-peer-deps && npm run build
+
+# Copy pre-built Auth UI from official Airflow image (avoids complex npm build)
+COPY --from=apache/airflow:3.0.0 \
+    /home/airflow/.local/lib/python3.12/site-packages/airflow/api_fastapi/auth/managers/simple/ui/dist \
+    /opt/airflow/airflow-core/src/airflow/api_fastapi/auth/managers/simple/ui/dist
 WORKDIR /opt/airflow
 
 # Copy temporal scripts
