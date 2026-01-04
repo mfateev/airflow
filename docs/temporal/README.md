@@ -287,6 +287,23 @@ docker-compose -f docker-compose-temporal.yaml down -v
 
 ## Troubleshooting
 
+### Container Name Conflict
+
+If you see an error like:
+```
+Error response from daemon: Conflict. The container name "/temporal" is already in use
+```
+
+Stop and remove existing containers first:
+```bash
+docker-compose -f docker-compose-temporal.yaml down
+```
+
+Or remove all related containers:
+```bash
+docker rm -f temporal postgres airflow-apiserver airflow-dag-processor airflow-scheduler temporal-worker airflow-init 2>/dev/null; docker-compose -f docker-compose-temporal.yaml up -d
+```
+
 ### DAG Not Appearing in UI
 
 1. Check the DAG file is in `./dags/` directory
