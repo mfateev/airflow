@@ -237,33 +237,38 @@ async def run_airflow_task(input: ActivityTaskInput) -> TaskExecutionResult:
             )
 
             # Step 3: Create minimal execution context (no DB access)
-            # This is a simplified context for basic operators
+            # IMPORTANT: Do NOT include 'dag' and 'task' objects in context!
+            # They have circular references that cause RecursionError in
+            # XComArg.iter_xcom_references() when PythonOperator sets op_kwargs.
             context = {
-                "dag": dag,
-                "task": task,
                 "dag_id": input.dag_id,
                 "task_id": input.task_id,
                 "run_id": input.run_id,
                 "logical_date": input.logical_date,
                 "try_number": input.try_number,
                 "map_index": input.map_index,
+                # Add common template variables for convenience
+                "ds": input.logical_date.strftime("%Y-%m-%d") if input.logical_date else None,
+                "ts": input.logical_date.isoformat() if input.logical_date else None,
             }
 
-            # Add XCom pull function if upstream results provided
-            if input.upstream_results:
-                def xcom_pull(task_ids=None, key="return_value"):
-                    """Simple XCom pull from upstream_results dict."""
-                    if task_ids is None:
-                        return None
+            # Create minimal task_instance object for context
+            # Always provide ti/task_instance so **context works consistently
+            def xcom_pull(task_ids=None, key="return_value"):
+                """Simple XCom pull from upstream_results dict."""
+                if task_ids is None:
+                    return None
+                if input.upstream_results:
                     return input.upstream_results.get(task_ids)
+                return None
 
-                # Create minimal task_instance object for context
-                class MinimalTI:
-                    def __init__(self, xcom_pull_fn):
-                        self.xcom_pull = xcom_pull_fn
+            class MinimalTI:
+                """Minimal TaskInstance for context - only provides xcom_pull."""
+                def __init__(self, xcom_pull_fn):
+                    self.xcom_pull = xcom_pull_fn
 
-                context["task_instance"] = MinimalTI(xcom_pull)
-                context["ti"] = context["task_instance"]
+            context["task_instance"] = MinimalTI(xcom_pull)
+            context["ti"] = context["task_instance"]
 
             activity.logger.info(f"Executing {task.__class__.__name__}.execute()")
 
