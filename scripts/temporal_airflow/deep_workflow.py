@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -65,20 +66,12 @@ class ExecuteAirflowDagDeepWorkflow:
     - Syncs status to real Airflow DB (via activities)
     - Connections/variables read from real DB by hooks
 
-    TODO: Memory leak on cache eviction
-        The in-memory SQLite databases (one per workflow execution) are not cleaned
-        up when workflows are evicted from the worker's sticky cache. This causes
-        memory to grow over time as workflows complete but their databases persist.
+    Memory cleanup on cache eviction:
+        Uses weakref.finalize to register engine.dispose() callback when workflow
+        instance is garbage collected (happens when evicted from Temporal's sticky
+        cache). This prevents in-memory SQLite databases from leaking memory.
 
-        To fix this properly, the Temporal SDK needs a "workflow cache eviction callback"
-        that allows cleanup code to run when a workflow is evicted. This feature does
-        not currently exist in the Python SDK.
-
-        Workarounds to consider:
-        1. Reduce sticky cache size to limit memory growth
-        2. Periodically restart workers to reclaim memory
-        3. Use file-based SQLite with cleanup (adds I/O overhead)
-        4. Request SDK feature: workflow eviction callback
+        See _initialize_database() for implementation.
     """
 
     def __init__(self):
@@ -125,6 +118,16 @@ class ExecuteAirflowDagDeepWorkflow:
             poolclass=StaticPool,
             connect_args={"check_same_thread": False},
         )
+
+        # Register cleanup callback for when workflow is garbage collected
+        # (happens when evicted from Temporal's sticky cache)
+        # NOTE: The callback must NOT reference self to avoid preventing GC
+        def _dispose_engine(engine, db_name):
+            engine.dispose()
+            # workflow.logger is not available here, uncomment for debugging:
+            # print(f"[CLEANUP] Disposed engine for {db_name}")
+
+        self._db_cleanup = weakref.finalize(self, _dispose_engine, self.engine, db_name)
 
         # Create workflow-specific session factory
         self.sessionFactory = sessionmaker(

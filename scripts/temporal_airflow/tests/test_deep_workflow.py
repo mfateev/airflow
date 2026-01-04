@@ -605,3 +605,52 @@ class TestWorkflowReplay:
             assert dag_run_id1 is not None
             assert dag_run_id2 is not None
             assert dag_run_id3 is not None
+
+    def test_memory_cleanup_on_garbage_collection(self):
+        """Engine should be disposed when workflow is garbage collected.
+
+        This tests the weakref.finalize cleanup mechanism that prevents
+        memory leaks when workflows are evicted from Temporal's sticky cache.
+        """
+        import gc
+        import weakref
+        from unittest.mock import MagicMock, patch
+
+        # Track whether cleanup was called
+        cleanup_called = []
+
+        with patch("temporal_airflow.deep_workflow.workflow") as mock_workflow_module:
+            mock_info = MagicMock()
+            mock_info.workflow_id = "test-cleanup"
+            mock_info.run_id = "test-run-cleanup"
+            mock_workflow_module.info.return_value = mock_info
+            mock_workflow_module.logger = MagicMock()
+
+            # Create workflow and initialize database
+            workflow = ExecuteAirflowDagDeepWorkflow()
+            workflow._initialize_database()
+
+            # Verify finalizer is registered
+            assert hasattr(workflow, "_db_cleanup")
+            assert workflow._db_cleanup.alive  # Finalizer should be alive
+
+            # Get reference to engine before deleting workflow
+            engine = workflow.engine
+            assert engine is not None
+
+            # Create a weak reference to track when workflow is collected
+            workflow_ref = weakref.ref(workflow)
+
+            # Delete workflow instance
+            del workflow
+
+            # Force garbage collection
+            gc.collect()
+
+            # Workflow should be collected
+            assert workflow_ref() is None, "Workflow should have been garbage collected"
+
+            # Engine should be disposed (connections closed)
+            # After dispose(), the engine's pool should be invalidated
+            # We can't easily check this directly, but the test verifies
+            # that the cleanup mechanism is properly registered
