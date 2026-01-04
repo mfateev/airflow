@@ -68,7 +68,7 @@ class TestDeepWorkflowStructure:
         assert hasattr(workflow, "_initialize_database")
         assert hasattr(workflow, "_create_local_dag_run")
         assert hasattr(workflow, "_get_upstream_xcom")
-        assert hasattr(workflow, "_handle_activity_result")
+        assert hasattr(workflow, "_update_local_task_state")
         assert hasattr(workflow, "_scheduling_loop")
 
 
@@ -335,3 +335,273 @@ class TestDesignPrinciple:
         sig = inspect.signature(workflow._scheduling_loop)
         params = list(sig.parameters.keys())
         assert "dag_run_id" in params
+
+
+class TestWorkflowReplay:
+    """Tests for workflow replay behavior.
+
+    Temporal workflows can replay from history, which means the same workflow
+    code runs multiple times within the same worker process. The in-memory
+    SQLite database must handle this correctly.
+    """
+
+    def test_initialize_database_creates_fresh_db_on_replay(self):
+        """Database should be fresh on each initialization (simulating replay).
+
+        This tests that calling _initialize_database multiple times doesn't
+        cause UNIQUE constraint errors, which would happen if the database
+        retained data from previous runs.
+        """
+        from unittest.mock import MagicMock, patch
+
+        workflow = ExecuteAirflowDagDeepWorkflow()
+
+        # Mock workflow.info() to return consistent IDs (simulating same execution)
+        mock_info = MagicMock()
+        mock_info.workflow_id = "test-workflow-id"
+        mock_info.run_id = "test-run-id-12345"
+
+        with patch("temporal_airflow.deep_workflow.workflow") as mock_workflow_module:
+            mock_workflow_module.info.return_value = mock_info
+            mock_workflow_module.logger = MagicMock()
+
+            # First initialization
+            workflow._initialize_database()
+
+            # Verify engine and sessionFactory are set
+            assert workflow.engine is not None
+            assert workflow.sessionFactory is not None
+
+            # Create some data in the database
+            from airflow.models.dag_version import DagVersion
+            session = workflow.sessionFactory()
+            dag_version = DagVersion(dag_id="test_dag", version_number=1)
+            session.add(dag_version)
+            session.commit()
+            session.close()
+
+            # Second initialization (simulating replay)
+            # This should NOT raise UNIQUE constraint error
+            workflow._initialize_database()
+
+            # Verify database is fresh - should be able to create same record again
+            session = workflow.sessionFactory()
+            dag_version2 = DagVersion(dag_id="test_dag", version_number=1)
+            session.add(dag_version2)
+            session.commit()  # This would fail if DB wasn't fresh
+            session.close()
+
+    def test_different_run_ids_get_different_databases(self):
+        """Different run_ids should get different database instances.
+
+        This ensures that multiple workflow executions in the same worker
+        don't interfere with each other.
+        """
+        from unittest.mock import MagicMock, patch
+
+        workflow1 = ExecuteAirflowDagDeepWorkflow()
+        workflow2 = ExecuteAirflowDagDeepWorkflow()
+
+        with patch("temporal_airflow.deep_workflow.workflow") as mock_workflow_module:
+            mock_workflow_module.logger = MagicMock()
+
+            # First workflow with run_id_1
+            mock_info1 = MagicMock()
+            mock_info1.workflow_id = "test-workflow"
+            mock_info1.run_id = "run-id-1"
+            mock_workflow_module.info.return_value = mock_info1
+
+            workflow1._initialize_database()
+
+            # Create data in workflow1's database
+            from airflow.models.dag_version import DagVersion
+            session1 = workflow1.sessionFactory()
+            dag_version1 = DagVersion(dag_id="test_dag", version_number=1)
+            session1.add(dag_version1)
+            session1.commit()
+            session1.close()
+
+            # Second workflow with run_id_2
+            mock_info2 = MagicMock()
+            mock_info2.workflow_id = "test-workflow"
+            mock_info2.run_id = "run-id-2"
+            mock_workflow_module.info.return_value = mock_info2
+
+            workflow2._initialize_database()
+
+            # Should be able to create same record in workflow2's database
+            # because it's a different database instance
+            session2 = workflow2.sessionFactory()
+            dag_version2 = DagVersion(dag_id="test_dag", version_number=1)
+            session2.add(dag_version2)
+            session2.commit()  # Would fail if sharing same DB
+            session2.close()
+
+            # Verify data in each database is independent
+            session1 = workflow1.sessionFactory()
+            count1 = session1.query(DagVersion).count()
+            session1.close()
+
+            session2 = workflow2.sessionFactory()
+            count2 = session2.query(DagVersion).count()
+            session2.close()
+
+            # Each should have exactly 1 record (not 2)
+            assert count1 == 1
+            assert count2 == 1
+
+    def test_create_local_dag_run_succeeds_after_db_reinit(self):
+        """_create_local_dag_run should succeed after database reinitialization.
+
+        This simulates the full replay scenario where the workflow restarts
+        from the beginning.
+        """
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+
+        workflow = ExecuteAirflowDagDeepWorkflow()
+
+        mock_info = MagicMock()
+        mock_info.workflow_id = "test-workflow-replay"
+        mock_info.run_id = "test-run-replay"
+
+        # Create a minimal mock DAG
+        mock_dag = MagicMock()
+        mock_dag.dag_id = "test_dag"
+        mock_dag.task_dict = {}
+
+        with patch("temporal_airflow.deep_workflow.workflow") as mock_workflow_module:
+            mock_workflow_module.info.return_value = mock_info
+            mock_workflow_module.logger = MagicMock()
+
+            # Set the DAG on the workflow (normally done by loading from DB)
+            workflow.dag = mock_dag
+
+            # First execution
+            workflow._initialize_database()
+            dag_run_id1 = workflow._create_local_dag_run(
+                dag_id="test_dag",
+                run_id="run_1",
+                logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                conf={},
+            )
+            assert dag_run_id1 is not None
+
+            # Simulate replay - reinitialize and create again
+            workflow._initialize_database()
+            dag_run_id2 = workflow._create_local_dag_run(
+                dag_id="test_dag",
+                run_id="run_1",
+                logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                conf={},
+            )
+            assert dag_run_id2 is not None
+
+            # IDs might be different since it's a fresh DB, but both should succeed
+
+    def test_concurrent_workflows_have_isolated_databases(self):
+        """Multiple concurrent workflows should have completely isolated databases.
+
+        This simulates multiple DAGs running in parallel within the same worker.
+        Each workflow should have its own database that doesn't interfere with others.
+
+        We simulate concurrency by interleaving operations from multiple workflows
+        without completing any one workflow before starting others.
+        """
+        from unittest.mock import MagicMock, patch
+        from datetime import datetime, timezone
+
+        # Create 3 workflow instances (simulating 3 DAGs in same worker)
+        workflow1 = ExecuteAirflowDagDeepWorkflow()
+        workflow2 = ExecuteAirflowDagDeepWorkflow()
+        workflow3 = ExecuteAirflowDagDeepWorkflow()
+
+        # Create mock DAGs
+        mock_dag1 = MagicMock()
+        mock_dag1.dag_id = "dag_a"
+        mock_dag1.task_dict = {}
+
+        mock_dag2 = MagicMock()
+        mock_dag2.dag_id = "dag_b"
+        mock_dag2.task_dict = {}
+
+        mock_dag3 = MagicMock()
+        mock_dag3.dag_id = "dag_c"
+        mock_dag3.task_dict = {}
+
+        workflow1.dag = mock_dag1
+        workflow2.dag = mock_dag2
+        workflow3.dag = mock_dag3
+
+        with patch("temporal_airflow.deep_workflow.workflow") as mock_workflow_module:
+            mock_workflow_module.logger = MagicMock()
+
+            # Initialize all 3 databases in interleaved order (simulating concurrent start)
+            mock_info1 = MagicMock()
+            mock_info1.workflow_id = "concurrent-test-1"
+            mock_info1.run_id = "run-1"
+            mock_workflow_module.info.return_value = mock_info1
+            workflow1._initialize_database()
+
+            mock_info2 = MagicMock()
+            mock_info2.workflow_id = "concurrent-test-2"
+            mock_info2.run_id = "run-2"
+            mock_workflow_module.info.return_value = mock_info2
+            workflow2._initialize_database()
+
+            mock_info3 = MagicMock()
+            mock_info3.workflow_id = "concurrent-test-3"
+            mock_info3.run_id = "run-3"
+            mock_workflow_module.info.return_value = mock_info3
+            workflow3._initialize_database()
+
+            # Now create DagRuns in all 3 (interleaved, simulating parallel execution)
+            dag_run_id1 = workflow1._create_local_dag_run(
+                dag_id="dag_a",
+                run_id="run_a",
+                logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                conf={},
+            )
+
+            dag_run_id2 = workflow2._create_local_dag_run(
+                dag_id="dag_b",
+                run_id="run_b",
+                logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                conf={},
+            )
+
+            dag_run_id3 = workflow3._create_local_dag_run(
+                dag_id="dag_c",
+                run_id="run_c",
+                logical_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
+                conf={},
+            )
+
+            # Verify each workflow sees only its own data
+            from airflow.models.dagrun import DagRun
+
+            session1 = workflow1.sessionFactory()
+            dag_runs1 = session1.query(DagRun).all()
+            session1.close()
+
+            session2 = workflow2.sessionFactory()
+            dag_runs2 = session2.query(DagRun).all()
+            session2.close()
+
+            session3 = workflow3.sessionFactory()
+            dag_runs3 = session3.query(DagRun).all()
+            session3.close()
+
+            # Each workflow should see exactly 1 DagRun with its own dag_id
+            assert len(dag_runs1) == 1, f"workflow1 has {len(dag_runs1)} dag runs"
+            assert len(dag_runs2) == 1, f"workflow2 has {len(dag_runs2)} dag runs"
+            assert len(dag_runs3) == 1, f"workflow3 has {len(dag_runs3)} dag runs"
+
+            assert dag_runs1[0].dag_id == "dag_a"
+            assert dag_runs2[0].dag_id == "dag_b"
+            assert dag_runs3[0].dag_id == "dag_c"
+
+            # Verify IDs are not None
+            assert dag_run_id1 is not None
+            assert dag_run_id2 is not None
+            assert dag_run_id3 is not None

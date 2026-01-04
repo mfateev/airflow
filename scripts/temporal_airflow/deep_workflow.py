@@ -64,6 +64,21 @@ class ExecuteAirflowDagDeepWorkflow:
     - Loads DAG from real Airflow DB (via activity)
     - Syncs status to real Airflow DB (via activities)
     - Connections/variables read from real DB by hooks
+
+    TODO: Memory leak on cache eviction
+        The in-memory SQLite databases (one per workflow execution) are not cleaned
+        up when workflows are evicted from the worker's sticky cache. This causes
+        memory to grow over time as workflows complete but their databases persist.
+
+        To fix this properly, the Temporal SDK needs a "workflow cache eviction callback"
+        that allows cleanup code to run when a workflow is evicted. This feature does
+        not currently exist in the Python SDK.
+
+        Workarounds to consider:
+        1. Reduce sticky cache size to limit memory growth
+        2. Periodically restart workers to reclaim memory
+        3. Use file-based SQLite with cleanup (adds I/O overhead)
+        4. Request SDK feature: workflow eviction callback
     """
 
     def __init__(self):
@@ -90,10 +105,19 @@ class ExecuteAirflowDagDeepWorkflow:
         """
         Initialize workflow-specific in-memory database.
 
-        SAME AS STANDALONE: Each workflow gets unique in-memory DB.
+        Each workflow execution gets a fresh database. We use workflow_id + run_id
+        to create unique databases per execution. The run_id changes on continue-as-new
+        but stays the same during replay of the same execution.
+
+        IMPORTANT: We drop all tables first to handle replay scenarios where
+        the in-memory database may have stale data from a previous replay attempt
+        within the same worker process.
         """
         workflow_id = workflow.info().workflow_id
-        conn_str = f"sqlite:///file:memdb_{workflow_id}?mode=memory&cache=shared&uri=true"
+        run_id = workflow.info().run_id
+        # Use both workflow_id and run_id for unique database per execution
+        db_name = f"memdb_{workflow_id}_{run_id}".replace("-", "_")
+        conn_str = f"sqlite:///file:{db_name}?mode=memory&cache=shared&uri=true"
 
         # Create workflow-specific engine (no global state!)
         self.engine = create_engine(
@@ -110,10 +134,15 @@ class ExecuteAirflowDagDeepWorkflow:
             expire_on_commit=False,
         )
 
+        # Drop all tables first to ensure fresh state on replay
+        # This handles the case where the worker process has cached data
+        # from a previous replay attempt
+        Base.metadata.drop_all(self.engine)
+
         # Create schema
         Base.metadata.create_all(self.engine)
 
-        workflow.logger.info(f"Database initialized for workflow {workflow_id}")
+        workflow.logger.info(f"Database initialized for workflow {workflow_id} (run_id={run_id})")
 
     def _create_local_dag_run(
         self,
@@ -127,6 +156,9 @@ class ExecuteAirflowDagDeepWorkflow:
 
         SAME AS STANDALONE: Uses workflow-specific SessionFactory.
         This enables Airflow's native scheduling logic to work.
+
+        Note: The database is always fresh (dropped/recreated in _initialize_database)
+        so we don't need to check for existing records.
         """
         session = self.sessionFactory()
         try:
@@ -386,28 +418,11 @@ class ExecuteAirflowDagDeepWorkflow:
                     dag_run.schedule_tis(schedulable_tis, session=session)
                     session.commit()
 
-                    # DEEP INTEGRATION: Batch sync all QUEUED states in single activity
-                    queued_syncs = []
-                    now = workflow.now()
-                    for ti in schedulable_tis:
-                        ti_state = ti.state.value if ti.state is not None else "queued"
-                        queued_syncs.append(TaskStatusSync(
-                            dag_id=ti.dag_id,
-                            task_id=ti.task_id,
-                            run_id=self.run_id,
-                            map_index=ti.map_index,
-                            state=ti_state,
-                            start_date=now,
-                        ))
+                    # NOTE: We skip syncing QUEUED state to reduce round-trips.
+                    # Tasks go directly from None → Running → Success/Failed in Airflow UI.
+                    # The completion sync (after task finishes) provides the important state.
 
-                    if queued_syncs:
-                        await workflow.execute_activity(
-                            sync_task_status_batch,
-                            BatchTaskStatusSync(syncs=queued_syncs),
-                            start_to_close_timeout=timedelta(seconds=30),
-                        )
-
-                    # Now start all task activities
+                    # Start all task activities
                     for ti in schedulable_tis:
                         ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
 
