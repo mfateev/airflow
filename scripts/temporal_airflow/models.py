@@ -264,6 +264,12 @@ class DagRunStatusSync(BaseModel):
     end_date: datetime | None = Field(default=None, description="DAG run end time")
 
 
+class BatchTaskStatusSync(BaseModel):
+    """Input for batch sync_task_status activity."""
+
+    syncs: list[TaskStatusSync] = Field(..., description="List of task status syncs to apply")
+
+
 class LoadSerializedDagInput(BaseModel):
     """Input for load_serialized_dag activity."""
 

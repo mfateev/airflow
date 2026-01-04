@@ -32,6 +32,7 @@ from temporal_airflow.models import (
     TaskExecutionFailureDetails,
     CreateDagRunInput,
     TaskStatusSync,
+    BatchTaskStatusSync,
     DagRunStatusSync,
     LoadSerializedDagInput,
     EnsureTaskInstancesInput,
@@ -40,6 +41,7 @@ from temporal_airflow.activities import run_airflow_task
 from temporal_airflow.sync_activities import (
     create_dagrun_record,
     sync_task_status,
+    sync_task_status_batch,
     sync_dagrun_status,
     load_serialized_dag,
     ensure_task_instances,
@@ -304,11 +306,12 @@ class ExecuteAirflowDagDeepWorkflow:
         finally:
             clear_time_provider()
 
-    async def _handle_activity_result(self, ti_key: tuple, result: TaskExecutionResult):
+    async def _update_local_task_state(self, ti_key: tuple, result: TaskExecutionResult):
         """
         Update TaskInstance in IN-WORKFLOW DB based on activity result.
 
-        SAME AS STANDALONE + sync to real Airflow DB.
+        This only updates the local in-memory DB. Sync to real Airflow DB
+        is done via batched sync_task_status_batch activity.
         """
         session = self.sessionFactory()
         try:
@@ -327,27 +330,11 @@ class ExecuteAirflowDagDeepWorkflow:
             session.commit()
 
             workflow.logger.info(
-                f"Updated task {ti_key} to state {ti.state} "
+                f"Updated local task {ti_key} to state {ti.state} "
                 f"(duration: {result.end_date - result.start_date})"
             )
         finally:
             session.close()
-
-        # DEEP INTEGRATION: Sync to real Airflow DB
-        await workflow.execute_activity(
-            sync_task_status,
-            TaskStatusSync(
-                dag_id=ti_key[0],
-                task_id=ti_key[1],
-                run_id=self.run_id,
-                map_index=ti_key[3],
-                state=result.state.value,
-                start_date=result.start_date,
-                end_date=result.end_date,
-                xcom_value=result.return_value if hasattr(result, 'return_value') else None,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-        )
 
     async def _scheduling_loop(self, dag_run_id: int) -> str:
         """
@@ -399,24 +386,30 @@ class ExecuteAirflowDagDeepWorkflow:
                     dag_run.schedule_tis(schedulable_tis, session=session)
                     session.commit()
 
+                    # DEEP INTEGRATION: Batch sync all QUEUED states in single activity
+                    queued_syncs = []
+                    now = workflow.now()
                     for ti in schedulable_tis:
-                        ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
-
-                        # DEEP INTEGRATION: Sync QUEUED state to real Airflow DB
-                        # In Airflow 3.x, ti.state may be None after schedule_tis
                         ti_state = ti.state.value if ti.state is not None else "queued"
+                        queued_syncs.append(TaskStatusSync(
+                            dag_id=ti.dag_id,
+                            task_id=ti.task_id,
+                            run_id=self.run_id,
+                            map_index=ti.map_index,
+                            state=ti_state,
+                            start_date=now,
+                        ))
+
+                    if queued_syncs:
                         await workflow.execute_activity(
-                            sync_task_status,
-                            TaskStatusSync(
-                                dag_id=ti.dag_id,
-                                task_id=ti.task_id,
-                                run_id=self.run_id,
-                                map_index=ti.map_index,
-                                state=ti_state,
-                                start_date=workflow.now(),
-                            ),
+                            sync_task_status_batch,
+                            BatchTaskStatusSync(syncs=queued_syncs),
                             start_to_close_timeout=timedelta(seconds=30),
                         )
+
+                    # Now start all task activities
+                    for ti in schedulable_tis:
+                        ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
 
                         # Gather upstream XCom
                         task = self.dag.get_task(ti.task_id)
@@ -476,9 +469,13 @@ class ExecuteAirflowDagDeepWorkflow:
                     f"Activity wait completed: {len(done)} done, {len(pending)} pending"
                 )
 
-                # Process completed activities
+                # Process completed activities and collect syncs for batching
+                completion_syncs = []
+                completed_keys = []
+
                 for completed in done:
                     ti_key = next(k for k, v in running_activities.items() if v == completed)
+                    completed_keys.append(ti_key)
 
                     workflow.logger.info(f"Processing completed activity for {ti_key}")
 
@@ -498,8 +495,20 @@ class ExecuteAirflowDagDeepWorkflow:
                         elif result.state == TaskInstanceState.FAILED:
                             self.tasks_failed += 1
 
-                        # Update in-workflow DB + sync to real Airflow DB
-                        await self._handle_activity_result(ti_key, result)
+                        # Update in-workflow DB (local)
+                        await self._update_local_task_state(ti_key, result)
+
+                        # Collect sync for batching
+                        completion_syncs.append(TaskStatusSync(
+                            dag_id=ti_key[0],
+                            task_id=ti_key[1],
+                            run_id=self.run_id,
+                            map_index=ti_key[3],
+                            state=result.state.value,
+                            start_date=result.start_date,
+                            end_date=result.end_date,
+                            xcom_value=result.return_value if hasattr(result, 'return_value') else None,
+                        ))
 
                     except ActivityError as e:
                         workflow.logger.error(
@@ -520,7 +529,18 @@ class ExecuteAirflowDagDeepWorkflow:
                             error_message=str(e.message),
                         )
 
-                        await self._handle_activity_result(ti_key, failed_result)
+                        await self._update_local_task_state(ti_key, failed_result)
+
+                        # Collect sync for batching
+                        completion_syncs.append(TaskStatusSync(
+                            dag_id=ti_key[0],
+                            task_id=ti_key[1],
+                            run_id=self.run_id,
+                            map_index=ti_key[3],
+                            state=TaskInstanceState.FAILED.value,
+                            start_date=failed_result.start_date,
+                            end_date=failed_result.end_date,
+                        ))
 
                     except Exception as e:
                         workflow.logger.error(
@@ -528,6 +548,16 @@ class ExecuteAirflowDagDeepWorkflow:
                         )
                         self.tasks_failed += 1
 
+                # Batch sync all completion states in single activity
+                if completion_syncs:
+                    await workflow.execute_activity(
+                        sync_task_status_batch,
+                        BatchTaskStatusSync(syncs=completion_syncs),
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+
+                # Remove completed from running
+                for ti_key in completed_keys:
                     del running_activities[ti_key]
 
             else:

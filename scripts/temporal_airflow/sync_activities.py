@@ -37,6 +37,7 @@ from airflow.utils.state import DagRunState, TaskInstanceState
 from airflow.utils.types import DagRunType
 
 from temporal_airflow.models import (
+    BatchTaskStatusSync,
     CreateDagRunInput,
     CreateDagRunResult,
     DagRunStatusSync,
@@ -198,6 +199,75 @@ async def sync_task_status(input: TaskStatusSync) -> None:
 
         activity.logger.info(
             f"Synced TaskInstance {input.dag_id}.{input.task_id} to state={input.state}"
+        )
+
+
+@activity.defn(name="sync_task_status_batch")
+async def sync_task_status_batch(input: BatchTaskStatusSync) -> None:
+    """
+    Batch update multiple task statuses in a single database transaction.
+
+    This is more efficient than calling sync_task_status multiple times
+    because it reduces the number of activity round-trips and commits.
+    """
+    if not input.syncs:
+        return
+
+    activity.logger.info(
+        f"Batch syncing {len(input.syncs)} task statuses"
+    )
+
+    with create_session() as session:
+        for sync in input.syncs:
+            # Find the TaskInstance
+            ti = (
+                session.query(TaskInstance)
+                .filter(
+                    TaskInstance.dag_id == sync.dag_id,
+                    TaskInstance.task_id == sync.task_id,
+                    TaskInstance.run_id == sync.run_id,
+                    TaskInstance.map_index == sync.map_index,
+                )
+                .first()
+            )
+
+            if not ti:
+                activity.logger.warning(
+                    f"TaskInstance not found: {sync.dag_id}.{sync.task_id} "
+                    f"(run_id={sync.run_id}, map_index={sync.map_index})"
+                )
+                continue
+
+            # Update TaskInstance state
+            ti.state = TaskInstanceState(sync.state)
+
+            if sync.start_date:
+                ti.start_date = sync.start_date
+
+            if sync.end_date:
+                ti.end_date = sync.end_date
+
+            # Write XCom if provided
+            if sync.xcom_value is not None:
+                XComModel.set(
+                    key="return_value",
+                    value=sync.xcom_value,
+                    dag_id=sync.dag_id,
+                    task_id=sync.task_id,
+                    run_id=sync.run_id,
+                    map_index=sync.map_index,
+                    session=session,
+                )
+
+            activity.logger.debug(
+                f"Prepared sync: {sync.dag_id}.{sync.task_id} -> {sync.state}"
+            )
+
+        # Single commit for all updates
+        session.commit()
+
+        activity.logger.info(
+            f"Batch synced {len(input.syncs)} task statuses in single transaction"
         )
 
 

@@ -50,6 +50,7 @@ from temporal_airflow.activities import run_airflow_task
 from temporal_airflow.sync_activities import (
     create_dagrun_record,
     sync_task_status,
+    sync_task_status_batch,
     sync_dagrun_status,
     load_serialized_dag,
     ensure_task_instances,
@@ -142,6 +143,7 @@ async def main() -> None:
             # Sync activities for Airflow DB
             create_dagrun_record,
             sync_task_status,
+            sync_task_status_batch,
             sync_dagrun_status,
             load_serialized_dag,
             ensure_task_instances,
@@ -157,7 +159,8 @@ async def main() -> None:
     logger.info("  Activities:")
     logger.info("    - run_airflow_task (task execution)")
     logger.info("    - create_dagrun_record (sync to Airflow DB)")
-    logger.info("    - sync_task_status (sync to Airflow DB)")
+    logger.info("    - sync_task_status (sync single task)")
+    logger.info("    - sync_task_status_batch (sync multiple tasks)")
     logger.info("    - sync_dagrun_status (sync to Airflow DB)")
     logger.info("    - load_serialized_dag (load from Airflow DB)")
     logger.info("    - ensure_task_instances (sync to Airflow DB)")
