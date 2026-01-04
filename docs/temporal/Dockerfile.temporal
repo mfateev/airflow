@@ -6,12 +6,14 @@
 
 FROM python:3.12-slim
 
-# Install system dependencies
+# Install system dependencies including Node.js for UI build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     git \
     libpq-dev \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Create airflow user
@@ -27,6 +29,11 @@ COPY --chown=airflow:0 task-sdk /opt/airflow/task-sdk
 
 # Copy airflow-core
 COPY --chown=airflow:0 airflow-core /opt/airflow/airflow-core
+
+# Build the Airflow UI (React app)
+WORKDIR /opt/airflow/airflow-core/src/airflow/ui
+RUN npm ci && npm run build
+WORKDIR /opt/airflow
 
 # Copy temporal scripts
 COPY --chown=airflow:0 scripts/temporal_airflow /opt/airflow/scripts/temporal_airflow
