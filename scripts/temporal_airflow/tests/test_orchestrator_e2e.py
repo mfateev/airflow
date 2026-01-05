@@ -53,6 +53,7 @@ from temporal_airflow.orchestrator import TemporalOrchestrator
 from temporal_airflow.sync_activities import (
     create_dagrun_record,
     sync_task_status,
+    sync_task_status_batch,
     sync_dagrun_status,
     load_serialized_dag,
     ensure_task_instances,
@@ -190,6 +191,7 @@ def _serialize_dag_to_db(dag):
 ALL_ACTIVITIES = [
     create_dagrun_record,
     sync_task_status,
+    sync_task_status_batch,
     sync_dagrun_status,
     load_serialized_dag,
     ensure_task_instances,
