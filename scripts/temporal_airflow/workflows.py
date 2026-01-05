@@ -16,14 +16,14 @@ with workflow.unsafe.imports_passed_through():
     from airflow.models.dagrun import DagRun, DagRunState
     from airflow.models.dag_version import DagVersion
     from airflow.models.taskinstance import TaskInstance, TaskInstanceState
-    from airflow.models.trigger import Trigger  # Required for Callback foreign key
+    from airflow.models.trigger import Trigger  # Required for TaskInstance.trigger_id FK
+    from airflow.models.tasklog import LogTemplate  # Required for DagRun.log_template_id FK
     from airflow.serialization.serialized_objects import SerializedDAG  # Still needed for DAG deserialization
     from airflow._shared.timezones import timezone as airflow_timezone
     from airflow.utils.time_provider import set_time_provider, clear_time_provider
     from sqlalchemy import create_engine
     from sqlalchemy.pool import StaticPool
     from sqlalchemy.orm import sessionmaker
-    from airflow.models import Base
 
 from temporal_airflow.models import (
     DagExecutionInput,
@@ -187,8 +187,17 @@ class ExecuteAirflowDagWorkflow:
             expire_on_commit=False,
         )
 
-        # Create schema
-        Base.metadata.create_all(self.engine)
+        # Create only the required tables (not all Airflow tables)
+        # This avoids the slow Base.metadata.create_all() that triggers deadlock detection
+        required_tables = [
+            LogTemplate.__table__,  # Required for DagRun.log_template_id FK
+            DagVersion.__table__,   # Required for DagRun foreign key
+            Trigger.__table__,      # Required for TaskInstance.trigger_id FK
+            DagRun.__table__,
+            TaskInstance.__table__,
+        ]
+        for table in required_tables:
+            table.create(self.engine, checkfirst=True)
 
         workflow.logger.info(f"Database initialized for workflow {workflow_id}")
 
