@@ -45,6 +45,8 @@ from airflow.utils.session import create_session
 from airflow.utils.state import DagRunState, TaskInstanceState
 from airflow.utils.types import DagRunType
 
+from temporalio.api.enums.v1 import EventType
+
 from temporal_airflow.activities import run_airflow_task
 from temporal_airflow.deep_workflow import ExecuteAirflowDagDeepWorkflow
 from temporal_airflow.models import DeepDagExecutionInput, DagExecutionFailureDetails
@@ -55,6 +57,40 @@ from temporal_airflow.sync_activities import (
     load_serialized_dag,
     ensure_task_instances,
 )
+
+
+async def assert_no_workflow_task_failures(client, workflow_id: str) -> None:
+    """Check workflow history for WorkflowTaskFailed events (indicates deadlock).
+
+    Temporal's deadlock detector triggers WorkflowTaskFailed events when workflow
+    code doesn't yield within 2 seconds. This helper checks the workflow history
+    to ensure no such events occurred.
+
+    Args:
+        client: Temporal client
+        workflow_id: The workflow ID to check
+
+    Raises:
+        AssertionError: If any WorkflowTaskFailed events are found
+    """
+    handle = client.get_workflow_handle(workflow_id)
+    history = await handle.fetch_history()
+
+    failed_events = []
+    for event in history.events:
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+            failure = event.workflow_task_failed_event_attributes
+            failed_events.append({
+                "event_id": event.event_id,
+                "cause": str(failure.cause) if failure.cause else "unknown",
+                "failure": str(failure.failure.message) if failure.failure else "no message",
+            })
+
+    if failed_events:
+        raise AssertionError(
+            f"Workflow {workflow_id} had {len(failed_events)} WorkflowTaskFailed events "
+            f"(possible deadlock): {failed_events}"
+        )
 
 
 # Set DAGS_FOLDER to the directory containing test DAGs
@@ -192,12 +228,16 @@ class TestDeepWorkflowE2E:
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
                     activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
+                    workflow_id = "test-deep-simple"
                     result = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
                         input_data,
-                        id="test-deep-simple",
+                        id=workflow_id,
                         task_queue="test-queue",
                     )
+
+                    # Check for deadlock events in workflow history
+                    await assert_no_workflow_task_failures(env.client, workflow_id)
 
                     # Verify workflow result
                     assert result.state == "success"
@@ -245,12 +285,16 @@ class TestDeepWorkflowE2E:
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
                     activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
+                    workflow_id = "test-deep-parallel"
                     result = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
                         input_data,
-                        id="test-deep-parallel",
+                        id=workflow_id,
                         task_queue="test-queue",
                     )
+
+                    # Check for deadlock events in workflow history
+                    await assert_no_workflow_task_failures(env.client, workflow_id)
 
                     # Verify workflow result
                     assert result.state == "success"
@@ -290,14 +334,19 @@ class TestDeepWorkflowE2E:
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
                     activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
+                    workflow_id = "test-deep-mixed"
                     # Workflow should fail with ApplicationError
                     with pytest.raises(WorkflowFailureError) as exc_info:
                         await env.client.execute_workflow(
                             ExecuteAirflowDagDeepWorkflow.run,
                             input_data,
-                            id="test-deep-mixed",
+                            id=workflow_id,
                             task_queue="test-queue",
                         )
+
+                    # Check for deadlock events in workflow history
+                    # (workflow failed due to task failure, not deadlock)
+                    await assert_no_workflow_task_failures(env.client, workflow_id)
 
                     # Verify it's a DagExecutionFailure
                     assert isinstance(exc_info.value.cause, ApplicationError)
@@ -367,12 +416,16 @@ class TestDeepWorkflowE2E:
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
                     activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
+                    workflow_id = "test-deep-existing-run"
                     result = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
                         input_data,
-                        id="test-deep-existing-run",
+                        id=workflow_id,
                         task_queue="test-queue",
                     )
+
+                    # Check for deadlock events in workflow history
+                    await assert_no_workflow_task_failures(env.client, workflow_id)
 
                     assert result.state == "success"
                     assert result.run_id == run_id
@@ -410,22 +463,30 @@ class TestDeepWorkflowE2E:
                     activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
                     # Run workflow first time
+                    workflow_id_1 = "test-deep-idempotent-1"
                     result1 = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
                         input_data,
-                        id="test-deep-idempotent-1",
+                        id=workflow_id_1,
                         task_queue="test-queue",
                     )
+
+                    # Check for deadlock events in workflow history
+                    await assert_no_workflow_task_failures(env.client, workflow_id_1)
 
                     assert result1.state == "success"
 
                     # Run workflow second time with same logical_date
+                    workflow_id_2 = "test-deep-idempotent-2"
                     result2 = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
                         input_data,
-                        id="test-deep-idempotent-2",
+                        id=workflow_id_2,
                         task_queue="test-queue",
                     )
+
+                    # Check for deadlock events in workflow history
+                    await assert_no_workflow_task_failures(env.client, workflow_id_2)
 
                     assert result2.state == "success"
                     # Should get same run_id due to idempotent creation

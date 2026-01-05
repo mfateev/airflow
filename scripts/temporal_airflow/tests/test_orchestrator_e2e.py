@@ -45,6 +45,8 @@ from airflow.utils.session import create_session
 from airflow.utils.state import DagRunState, TaskInstanceState
 from airflow.utils.types import DagRunType
 
+from temporalio.api.enums.v1 import EventType
+
 from temporal_airflow.activities import run_airflow_task
 from temporal_airflow.deep_workflow import ExecuteAirflowDagDeepWorkflow
 from temporal_airflow.orchestrator import TemporalOrchestrator
@@ -55,6 +57,40 @@ from temporal_airflow.sync_activities import (
     load_serialized_dag,
     ensure_task_instances,
 )
+
+
+async def assert_no_workflow_task_failures(client, workflow_id: str) -> None:
+    """Check workflow history for WorkflowTaskFailed events (indicates deadlock).
+
+    Temporal's deadlock detector triggers WorkflowTaskFailed events when workflow
+    code doesn't yield within 2 seconds. This helper checks the workflow history
+    to ensure no such events occurred.
+
+    Args:
+        client: Temporal client
+        workflow_id: The workflow ID to check
+
+    Raises:
+        AssertionError: If any WorkflowTaskFailed events are found
+    """
+    handle = client.get_workflow_handle(workflow_id)
+    history = await handle.fetch_history()
+
+    failed_events = []
+    for event in history.events:
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+            failure = event.workflow_task_failed_event_attributes
+            failed_events.append({
+                "event_id": event.event_id,
+                "cause": str(failure.cause) if failure.cause else "unknown",
+                "failure": str(failure.failure.message) if failure.failure else "no message",
+            })
+
+    if failed_events:
+        raise AssertionError(
+            f"Workflow {workflow_id} had {len(failed_events)} WorkflowTaskFailed events "
+            f"(possible deadlock): {failed_events}"
+        )
 
 
 # Set DAGS_FOLDER to the directory containing test DAGs
@@ -240,6 +276,9 @@ class TestOrchestratorE2E:
                 handle = env.client.get_workflow_handle(workflow_id)
                 result = await handle.result()
 
+                # Check for deadlock events in workflow history
+                await assert_no_workflow_task_failures(env.client, workflow_id)
+
                 # Verify workflow completed successfully (result is a dict)
                 assert result["state"] == "success"
                 assert result["dag_id"] == "test_loop_structure"
@@ -313,6 +352,9 @@ class TestOrchestratorE2E:
                 handle = env.client.get_workflow_handle(workflow_id)
                 result = await handle.result()
 
+                # Check for deadlock events in workflow history
+                await assert_no_workflow_task_failures(env.client, workflow_id)
+
                 assert result["state"] == "success"
 
                 # Verify existing DagRun was updated (not a new one created)
@@ -359,6 +401,9 @@ class TestOrchestratorE2E:
                 handle = env.client.get_workflow_handle(workflow_id)
                 result = await handle.result()
 
+                # Check for deadlock events in workflow history
+                await assert_no_workflow_task_failures(env.client, workflow_id)
+
                 # Verify DagRun in DB is EXTERNAL (created by workflow)
                 with create_session() as session:
                     dag_run = session.query(DagRun).filter(
@@ -396,6 +441,9 @@ class TestOrchestratorE2E:
                 workflow_id = f"airflow-{mock_dag_run.dag_id}-{mock_dag_run.run_id}"
                 handle = env.client.get_workflow_handle(workflow_id)
                 result = await handle.result()
+
+                # Check for deadlock events in workflow history
+                await assert_no_workflow_task_failures(env.client, workflow_id)
 
                 assert result["state"] == "success"
                 assert result["tasks_succeeded"] == 3  # 2 parallel + 1 join
