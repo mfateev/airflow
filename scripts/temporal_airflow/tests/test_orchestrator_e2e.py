@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
@@ -201,6 +203,7 @@ async def create_test_orchestrator():
             task_queue=task_queue,
             workflows=[ExecuteAirflowDagDeepWorkflow],
             activities=ALL_ACTIVITIES,
+            activity_executor=ThreadPoolExecutor(max_workers=5),
         ):
             yield orchestrator, env
 

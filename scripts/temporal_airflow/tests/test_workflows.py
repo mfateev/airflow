@@ -1,6 +1,7 @@
 """Tests for Temporal workflows."""
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,8 @@ def create_worker(client, task_queue, workflows, activities):
         task_queue=task_queue,
         workflows=workflows,
         activities=activities,
+        # Thread pool for sync activities (blocking I/O operations)
+        activity_executor=ThreadPoolExecutor(max_workers=5),
         workflow_runner=SandboxedWorkflowRunner(
             restrictions=SandboxRestrictions.default.with_passthrough_modules(
                 *PASSTHROUGH_MODULES

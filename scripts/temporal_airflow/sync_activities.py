@@ -49,7 +49,7 @@ from temporal_airflow.models import (
 
 
 @activity.defn(name="create_dagrun_record")
-async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
+def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
     """
     Create DagRun and TaskInstance records in Airflow database.
 
@@ -135,7 +135,7 @@ async def create_dagrun_record(input: CreateDagRunInput) -> CreateDagRunResult:
 
 
 @activity.defn(name="sync_task_status")
-async def sync_task_status(input: TaskStatusSync) -> None:
+def sync_task_status(input: TaskStatusSync) -> None:
     """
     Write task execution status to Airflow database for UI visibility.
 
@@ -203,7 +203,7 @@ async def sync_task_status(input: TaskStatusSync) -> None:
 
 
 @activity.defn(name="sync_task_status_batch")
-async def sync_task_status_batch(input: BatchTaskStatusSync) -> None:
+def sync_task_status_batch(input: BatchTaskStatusSync) -> None:
     """
     Batch update multiple task statuses in a single database transaction.
 
@@ -272,7 +272,7 @@ async def sync_task_status_batch(input: BatchTaskStatusSync) -> None:
 
 
 @activity.defn(name="sync_dagrun_status")
-async def sync_dagrun_status(input: DagRunStatusSync) -> None:
+def sync_dagrun_status(input: DagRunStatusSync) -> None:
     """
     Write DagRun final status to Airflow database.
 
@@ -311,7 +311,7 @@ async def sync_dagrun_status(input: DagRunStatusSync) -> None:
 
 
 @activity.defn(name="load_serialized_dag")
-async def load_serialized_dag(input: LoadSerializedDagInput) -> LoadSerializedDagResult:
+def load_serialized_dag(input: LoadSerializedDagInput) -> LoadSerializedDagResult:
     """
     Load serialized DAG from Airflow database.
 
@@ -346,7 +346,7 @@ async def load_serialized_dag(input: LoadSerializedDagInput) -> LoadSerializedDa
 
 
 @activity.defn(name="ensure_task_instances")
-async def ensure_task_instances(input: EnsureTaskInstancesInput) -> None:
+def ensure_task_instances(input: EnsureTaskInstancesInput) -> None:
     """
     Create TaskInstance records if they don't exist.
 

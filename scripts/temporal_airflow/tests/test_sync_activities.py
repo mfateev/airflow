@@ -146,8 +146,7 @@ def cleanup_dagruns():
 class TestCreateDagRunRecordReal:
     """Tests for create_dagrun_record activity with real models."""
 
-    @pytest.mark.asyncio
-    async def test_creates_new_dagrun(self, serialized_dag, cleanup_dagruns):
+    def test_creates_new_dagrun(self, serialized_dag, cleanup_dagruns):
         """create_dagrun_record should create a new DagRun with EXTERNAL type."""
         input_data = CreateDagRunInput(
             dag_id="test_sync_activities_dag",
@@ -155,7 +154,7 @@ class TestCreateDagRunRecordReal:
             conf={"key": "value"},
         )
 
-        result = await create_dagrun_record(input_data)
+        result = create_dagrun_record(input_data)
 
         # Verify the DagRun was created
         assert result.run_id is not None
@@ -184,8 +183,7 @@ class TestCreateDagRunRecordReal:
             assert "task1" in task_ids
             assert "task2" in task_ids
 
-    @pytest.mark.asyncio
-    async def test_returns_existing_dagrun(self, serialized_dag, cleanup_dagruns):
+    def test_returns_existing_dagrun(self, serialized_dag, cleanup_dagruns):
         """create_dagrun_record should return existing DagRun if found."""
         logical_date = datetime(2025, 6, 2, tzinfo=timezone.utc)
 
@@ -194,17 +192,16 @@ class TestCreateDagRunRecordReal:
             dag_id="test_sync_activities_dag",
             logical_date=logical_date,
         )
-        first_result = await create_dagrun_record(input_data)
+        first_result = create_dagrun_record(input_data)
 
         # Call again with same logical_date
-        second_result = await create_dagrun_record(input_data)
+        second_result = create_dagrun_record(input_data)
 
         # Should return the same DagRun
         assert second_result.dag_run_id == first_result.dag_run_id
         assert second_result.run_id == first_result.run_id
 
-    @pytest.mark.asyncio
-    async def test_raises_error_for_missing_serialized_dag(self):
+    def test_raises_error_for_missing_serialized_dag(self):
         """create_dagrun_record should raise ApplicationError if DAG not found."""
         input_data = CreateDagRunInput(
             dag_id="nonexistent_dag_12345",
@@ -212,7 +209,7 @@ class TestCreateDagRunRecordReal:
         )
 
         with pytest.raises(ApplicationError) as exc_info:
-            await create_dagrun_record(input_data)
+            create_dagrun_record(input_data)
 
         assert "not found" in str(exc_info.value)
 
@@ -220,15 +217,14 @@ class TestCreateDagRunRecordReal:
 class TestSyncTaskStatusReal:
     """Tests for sync_task_status activity with real models."""
 
-    @pytest.mark.asyncio
-    async def test_updates_task_state(self, serialized_dag, cleanup_dagruns):
+    def test_updates_task_state(self, serialized_dag, cleanup_dagruns):
         """sync_task_status should update TaskInstance state."""
         # First create a DagRun to get TaskInstances
         create_input = CreateDagRunInput(
             dag_id="test_sync_activities_dag",
             logical_date=datetime(2025, 6, 3, tzinfo=timezone.utc),
         )
-        dag_run_result = await create_dagrun_record(create_input)
+        dag_run_result = create_dagrun_record(create_input)
 
         # Sync task status
         sync_input = TaskStatusSync(
@@ -241,7 +237,7 @@ class TestSyncTaskStatusReal:
             end_date=datetime(2025, 6, 3, 12, 1, 0, tzinfo=timezone.utc),
         )
 
-        await sync_task_status(sync_input)
+        sync_task_status(sync_input)
 
         # Verify in database
         with create_session() as session:
@@ -259,8 +255,7 @@ class TestSyncTaskStatusReal:
             assert ti.start_date == sync_input.start_date
             assert ti.end_date == sync_input.end_date
 
-    @pytest.mark.asyncio
-    async def test_handles_missing_task_instance(self, serialized_dag, cleanup_dagruns):
+    def test_handles_missing_task_instance(self, serialized_dag, cleanup_dagruns):
         """sync_task_status should handle missing TaskInstance gracefully."""
         input_data = TaskStatusSync(
             dag_id="test_sync_activities_dag",
@@ -271,21 +266,20 @@ class TestSyncTaskStatusReal:
         )
 
         # Should not raise, just log warning
-        await sync_task_status(input_data)
+        sync_task_status(input_data)
 
 
 class TestSyncDagRunStatusReal:
     """Tests for sync_dagrun_status activity with real models."""
 
-    @pytest.mark.asyncio
-    async def test_updates_dagrun_state(self, serialized_dag, cleanup_dagruns):
+    def test_updates_dagrun_state(self, serialized_dag, cleanup_dagruns):
         """sync_dagrun_status should update DagRun state."""
         # First create a DagRun
         create_input = CreateDagRunInput(
             dag_id="test_sync_activities_dag",
             logical_date=datetime(2025, 6, 4, tzinfo=timezone.utc),
         )
-        dag_run_result = await create_dagrun_record(create_input)
+        dag_run_result = create_dagrun_record(create_input)
 
         # Sync DagRun status to success
         sync_input = DagRunStatusSync(
@@ -295,7 +289,7 @@ class TestSyncDagRunStatusReal:
             end_date=datetime(2025, 6, 4, 12, 5, 0, tzinfo=timezone.utc),
         )
 
-        await sync_dagrun_status(sync_input)
+        sync_dagrun_status(sync_input)
 
         # Verify in database
         with create_session() as session:
@@ -308,8 +302,7 @@ class TestSyncDagRunStatusReal:
             assert dag_run.state == DagRunState.SUCCESS
             assert dag_run.end_date == sync_input.end_date
 
-    @pytest.mark.asyncio
-    async def test_handles_missing_dagrun(self):
+    def test_handles_missing_dagrun(self):
         """sync_dagrun_status should handle missing DagRun gracefully."""
         input_data = DagRunStatusSync(
             dag_id="test_sync_activities_dag",
@@ -318,18 +311,17 @@ class TestSyncDagRunStatusReal:
         )
 
         # Should not raise, just log warning
-        await sync_dagrun_status(input_data)
+        sync_dagrun_status(input_data)
 
 
 class TestLoadSerializedDagReal:
     """Tests for load_serialized_dag activity with real models."""
 
-    @pytest.mark.asyncio
-    async def test_loads_serialized_dag(self, serialized_dag):
+    def test_loads_serialized_dag(self, serialized_dag):
         """load_serialized_dag should return serialized DAG data and fileloc."""
         input_data = LoadSerializedDagInput(dag_id="test_sync_activities_dag")
 
-        result = await load_serialized_dag(input_data)
+        result = load_serialized_dag(input_data)
 
         # Verify the data structure
         assert result.dag_data is not None
@@ -341,13 +333,12 @@ class TestLoadSerializedDagReal:
         assert result.fileloc is not None
         assert isinstance(result.fileloc, str)
 
-    @pytest.mark.asyncio
-    async def test_raises_error_for_missing_dag(self):
+    def test_raises_error_for_missing_dag(self):
         """load_serialized_dag should raise ApplicationError if DAG not found."""
         input_data = LoadSerializedDagInput(dag_id="nonexistent_dag_67890")
 
         with pytest.raises(ApplicationError) as exc_info:
-            await load_serialized_dag(input_data)
+            load_serialized_dag(input_data)
 
         assert "not found" in str(exc_info.value)
 
@@ -355,15 +346,14 @@ class TestLoadSerializedDagReal:
 class TestEnsureTaskInstancesReal:
     """Tests for ensure_task_instances activity with real models."""
 
-    @pytest.mark.asyncio
-    async def test_ensures_task_instances_exist(self, serialized_dag, cleanup_dagruns):
+    def test_ensures_task_instances_exist(self, serialized_dag, cleanup_dagruns):
         """ensure_task_instances should create TaskInstances if missing."""
         # First create a DagRun (which already creates TaskInstances)
         create_input = CreateDagRunInput(
             dag_id="test_sync_activities_dag",
             logical_date=datetime(2025, 6, 5, tzinfo=timezone.utc),
         )
-        dag_run_result = await create_dagrun_record(create_input)
+        dag_run_result = create_dagrun_record(create_input)
 
         # Call ensure_task_instances (should be idempotent)
         input_data = EnsureTaskInstancesInput(
@@ -371,7 +361,7 @@ class TestEnsureTaskInstancesReal:
             run_id=dag_run_result.run_id,
         )
 
-        await ensure_task_instances(input_data)
+        ensure_task_instances(input_data)
 
         # Verify TaskInstances still exist
         with create_session() as session:
@@ -382,8 +372,7 @@ class TestEnsureTaskInstancesReal:
             )
             assert len(task_instances) == 2
 
-    @pytest.mark.asyncio
-    async def test_raises_error_for_missing_dagrun(self):
+    def test_raises_error_for_missing_dagrun(self):
         """ensure_task_instances should raise ApplicationError if DagRun not found."""
         input_data = EnsureTaskInstancesInput(
             dag_id="test_sync_activities_dag",
@@ -391,7 +380,7 @@ class TestEnsureTaskInstancesReal:
         )
 
         with pytest.raises(ApplicationError) as exc_info:
-            await ensure_task_instances(input_data)
+            ensure_task_instances(input_data)
 
         assert "not found" in str(exc_info.value)
 

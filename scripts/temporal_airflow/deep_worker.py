@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Add scripts directory to path for temporal_airflow imports
@@ -132,6 +133,11 @@ async def main() -> None:
         logger.error("Check your Temporal configuration")
         sys.exit(1)
 
+    # Create thread pool for sync activities
+    # Sync activities (def, not async def) run blocking I/O operations
+    # (SQLAlchemy queries, file I/O) and must run in a thread pool
+    activity_executor = ThreadPoolExecutor(max_workers=10)
+
     # Create worker with deep workflow and all activities
     worker = Worker(
         client,
@@ -148,6 +154,7 @@ async def main() -> None:
             load_serialized_dag,
             ensure_task_instances,
         ],
+        activity_executor=activity_executor,
     )
 
     logger.info("")

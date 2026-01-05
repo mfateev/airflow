@@ -34,6 +34,8 @@ from datetime import timezone as tz
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 import time_machine
 from fastapi.testclient import TestClient
@@ -208,6 +210,7 @@ async def create_test_orchestrator():
             task_queue=task_queue,
             workflows=[ExecuteAirflowDagDeepWorkflow],
             activities=ALL_ACTIVITIES,
+            activity_executor=ThreadPoolExecutor(max_workers=5),
         ):
             yield orchestrator, env
 

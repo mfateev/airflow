@@ -50,6 +50,8 @@ from datetime import timezone as tz
 from pathlib import Path
 from typing import AsyncGenerator
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -239,6 +241,7 @@ async def run_worker_in_background(
         task_queue=task_queue,
         workflows=[ExecuteAirflowDagDeepWorkflow],
         activities=ALL_ACTIVITIES,
+        activity_executor=ThreadPoolExecutor(max_workers=5),
     )
 
     worker_task = asyncio.create_task(worker.run())

@@ -29,6 +29,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
@@ -188,6 +190,7 @@ class TestDeepWorkflowE2E:
                     task_queue="test-queue",
                     workflows=[ExecuteAirflowDagDeepWorkflow],
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
+                    activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
                     result = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
@@ -240,6 +243,7 @@ class TestDeepWorkflowE2E:
                     task_queue="test-queue",
                     workflows=[ExecuteAirflowDagDeepWorkflow],
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
+                    activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
                     result = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
@@ -284,6 +288,7 @@ class TestDeepWorkflowE2E:
                     task_queue="test-queue",
                     workflows=[ExecuteAirflowDagDeepWorkflow],
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
+                    activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
                     # Workflow should fail with ApplicationError
                     with pytest.raises(WorkflowFailureError) as exc_info:
@@ -360,6 +365,7 @@ class TestDeepWorkflowE2E:
                     task_queue="test-queue",
                     workflows=[ExecuteAirflowDagDeepWorkflow],
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
+                    activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
                     result = await env.client.execute_workflow(
                         ExecuteAirflowDagDeepWorkflow.run,
@@ -401,6 +407,7 @@ class TestDeepWorkflowE2E:
                     task_queue="test-queue",
                     workflows=[ExecuteAirflowDagDeepWorkflow],
                     activities=SYNC_ACTIVITIES + TASK_ACTIVITIES,
+                    activity_executor=ThreadPoolExecutor(max_workers=5),
                 ):
                     # Run workflow first time
                     result1 = await env.client.execute_workflow(

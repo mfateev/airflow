@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # Add scripts directory to path for temporal_airflow imports
@@ -119,12 +120,17 @@ async def main() -> None:
         logger.error("Check your Temporal configuration (env vars or ~/.config/temporalio/temporal.toml)")
         sys.exit(1)
 
+    # Create thread pool for sync activities
+    # run_airflow_task is a sync activity (blocking I/O) and must run in thread pool
+    activity_executor = ThreadPoolExecutor(max_workers=10)
+
     # Create worker
     worker = Worker(
         client,
         task_queue=task_queue,
         workflows=[ExecuteAirflowDagWorkflow],
         activities=[run_airflow_task],
+        activity_executor=activity_executor,
     )
 
     logger.info("")

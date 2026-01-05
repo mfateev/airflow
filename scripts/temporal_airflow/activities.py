@@ -197,7 +197,7 @@ def load_dag_from_file(dag_rel_path: str, dag_id: str):
 
 
 @activity.defn(name="run_airflow_task")
-async def run_airflow_task(input: ActivityTaskInput) -> TaskExecutionResult:
+def run_airflow_task(input: ActivityTaskInput) -> TaskExecutionResult:
     """
     Execute an Airflow task using executor pattern.
 
