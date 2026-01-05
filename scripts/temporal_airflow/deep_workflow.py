@@ -15,7 +15,8 @@ with workflow.unsafe.imports_passed_through():
     from airflow.models.dagrun import DagRun, DagRunState
     from airflow.models.dag_version import DagVersion
     from airflow.models.taskinstance import TaskInstance, TaskInstanceState
-    from airflow.models.trigger import Trigger  # Required for Callback foreign key
+    from airflow.models.trigger import Trigger  # Required for TaskInstance foreign key
+    from airflow.models.tasklog import LogTemplate  # Required for DagRun foreign key
     from airflow.serialization.serialized_objects import SerializedDAG
     from airflow._shared.timezones import timezone as airflow_timezone
     from airflow.utils.time_provider import set_time_provider, clear_time_provider
@@ -137,13 +138,22 @@ class ExecuteAirflowDagDeepWorkflow:
             expire_on_commit=False,
         )
 
-        # Drop all tables first to ensure fresh state on replay
-        # This handles the case where the worker process has cached data
-        # from a previous replay attempt
-        Base.metadata.drop_all(self.engine)
+        # Create only the tables we need (not all Airflow tables)
+        # This avoids the deadlock from creating hundreds of tables
+        # Order matters for foreign key dependencies
+        required_tables = [
+            LogTemplate.__table__,  # DagRun.log_template_id FK
+            DagVersion.__table__,   # DagRun.dag_version_id FK
+            Trigger.__table__,      # TaskInstance.trigger_id FK
+            DagRun.__table__,
+            TaskInstance.__table__,
+        ]
 
-        # Create schema
-        Base.metadata.create_all(self.engine)
+        # Drop and recreate only required tables to ensure fresh state on replay
+        for table in required_tables:
+            table.drop(self.engine, checkfirst=True)
+        for table in required_tables:
+            table.create(self.engine, checkfirst=True)
 
         workflow.logger.info(f"Database initialized for workflow {workflow_id} (run_id={run_id})")
 
