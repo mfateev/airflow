@@ -511,7 +511,9 @@ class ExecuteAirflowDagDeepWorkflow:
                     f"Waiting for {len(running_activities)} activities to complete..."
                 )
 
-                done, pending = await asyncio.wait(
+                # Use workflow.wait() instead of asyncio.wait() for determinism
+                # asyncio.wait() internally uses set() which is non-deterministic
+                done, pending = await workflow.wait(
                     running_activities.values(),
                     timeout=5,
                     return_when=asyncio.FIRST_COMPLETED

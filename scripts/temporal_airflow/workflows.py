@@ -419,8 +419,9 @@ class ExecuteAirflowDagWorkflow:
                     f"Waiting for {len(running_activities)} activities to complete..."
                 )
 
-                # Decision 2: Use asyncio.wait directly (no executor polling)
-                done, pending = await asyncio.wait(
+                # Use workflow.wait() instead of asyncio.wait() for determinism
+                # asyncio.wait() internally uses set() which is non-deterministic
+                done, pending = await workflow.wait(
                     running_activities.values(),
                     timeout=5,
                     return_when=asyncio.FIRST_COMPLETED
