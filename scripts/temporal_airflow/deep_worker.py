@@ -111,6 +111,24 @@ def _prewarm_imports() -> None:
     except Exception as e:
         logger.warning(f"Could not warm up deserialization: {e}")
 
+    # Pre-import scheduling/trigger rule modules (used in dag_run.update_state)
+    # These modules can cause slow lazy imports during workflow execution
+    try:
+        logger.info("Warming up scheduling modules...")
+        sched_start = time.time()
+        from airflow.models.dagrun import DagRun  # noqa: F401
+        from airflow.models.taskinstance import TaskInstance  # noqa: F401
+        from airflow.ti_deps.deps.trigger_rule_dep import TriggerRuleDep  # noqa: F401
+        from airflow.ti_deps.dep_context import DepContext  # noqa: F401
+        from airflow.utils.state import DagRunState, TaskInstanceState  # noqa: F401
+        from airflow.models.dagversion import DagVersion  # noqa: F401
+        # Import task instance dependency checking
+        from airflow.ti_deps.dependencies_deps import REQUEUEABLE_DEPS, RUNNING_DEPS  # noqa: F401
+        sched_time = time.time() - sched_start
+        logger.info(f"Scheduling modules warmup: {sched_time*1000:.0f}ms")
+    except Exception as e:
+        logger.warning(f"Could not warm up scheduling modules: {e}")
+
     elapsed = time.time() - start
     logger.info(f"Pre-warming complete in {elapsed:.2f}s")
 
