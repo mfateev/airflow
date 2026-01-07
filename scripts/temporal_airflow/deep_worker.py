@@ -67,10 +67,12 @@ logger = logging.getLogger(__name__)
 
 def _prewarm_imports() -> None:
     """
-    Pre-import heavy modules before starting workflows.
+    Pre-import heavy modules and warm up DAG deserialization.
 
     This prevents Temporal's deadlock detector from triggering when workflows
-    deserialize DAGs, since the imports will already be cached.
+    deserialize DAGs. The key insight: cold deserialization takes ~1.4s due to
+    operator imports, but warm deserialization is <1ms. By deserializing one DAG
+    at startup, we warm up all the common operator imports.
     """
     logger.info("Pre-warming imports (this may take a few seconds)...")
     import time
@@ -84,11 +86,30 @@ def _prewarm_imports() -> None:
         pass  # Not required, may not be installed
 
     # Pre-import Airflow serialization (triggers plugin loading)
-    from airflow.serialization.serialized_objects import SerializedDAG  # noqa: F401
+    from airflow.serialization.serialized_objects import SerializedDAG
+    from airflow.models.serialized_dag import SerializedDagModel
+    from airflow.utils.session import create_session
 
     # Pre-initialize plugin manager
     from airflow import plugins_manager
     plugins_manager.ensure_plugins_loaded()
+
+    # CRITICAL: Actually deserialize a DAG to warm up operator imports
+    # Cold deserialization: ~1.4s, Warm deserialization: <1ms
+    try:
+        with create_session() as session:
+            # Get any serialized DAG
+            serialized = session.query(SerializedDagModel).first()
+            if serialized:
+                logger.info(f"Warming up deserialization with DAG: {serialized.dag_id}")
+                deser_start = time.time()
+                _ = SerializedDAG.from_dict(serialized.data)
+                deser_time = time.time() - deser_start
+                logger.info(f"DAG deserialization warmup: {deser_time*1000:.0f}ms")
+            else:
+                logger.warning("No DAGs found for deserialization warmup")
+    except Exception as e:
+        logger.warning(f"Could not warm up deserialization: {e}")
 
     elapsed = time.time() - start
     logger.info(f"Pre-warming complete in {elapsed:.2f}s")

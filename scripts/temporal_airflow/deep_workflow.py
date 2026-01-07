@@ -258,6 +258,8 @@ class ExecuteAirflowDagDeepWorkflow:
                 LoadSerializedDagInput(dag_id=input.dag_id),
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            # Note: from_dict() is fast (<1ms) when imports are pre-warmed
+            # See deep_worker.py _prewarm_imports() which warms up deserialization
             self.dag = SerializedDAG.from_dict(dag_result.dag_data)
             self.dag_fileloc = dag_result.fileloc
             workflow.logger.info(

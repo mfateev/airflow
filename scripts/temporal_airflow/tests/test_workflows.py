@@ -59,9 +59,38 @@ def create_worker(client, task_queue, workflows, activities):
     )
 
 
+async def assert_no_workflow_task_failures(client, workflow_id: str) -> None:
+    """
+    Check workflow history for WorkflowTaskFailed events (indicates deadlock or other issues).
+
+    Raises AssertionError if any WorkflowTaskFailed events are found.
+    """
+    from temporalio.api.enums.v1 import EventType
+
+    handle = client.get_workflow_handle(workflow_id)
+    history = await handle.fetch_history()
+
+    failed_events = []
+    for event in history.events:
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED:
+            # Extract failure details
+            failure = event.workflow_task_failed_event_attributes
+            failed_events.append({
+                "event_id": event.event_id,
+                "cause": str(failure.cause) if failure.cause else "unknown",
+                "failure": str(failure.failure.message) if failure.failure else "no message",
+            })
+
+    if failed_events:
+        raise AssertionError(
+            f"Workflow {workflow_id} had {len(failed_events)} WorkflowTaskFailed events "
+            f"(possible deadlock): {failed_events}"
+        )
+
+
 @pytest.mark.asyncio
 async def test_workflow_database_initialization():
-    """Test that workflow initializes its own database."""
+    """Test that workflow initializes its own database without deadlocks."""
     from airflow import DAG
     from airflow.operators.python import PythonOperator
     from airflow.serialization.serialized_objects import SerializedDAG
@@ -88,6 +117,8 @@ async def test_workflow_database_initialization():
             serialized_dag=serialized,
         )
 
+        workflow_id = "test-workflow-db-init"
+
         # Start workflow
         async with create_worker(
             env.client,
@@ -99,7 +130,7 @@ async def test_workflow_database_initialization():
             result = await env.client.execute_workflow(
                 ExecuteAirflowDagWorkflow.run,
                 input_data,
-                id="test-workflow-db-init",
+                id=workflow_id,
                 task_queue="test-queue",
             )
 
@@ -109,6 +140,10 @@ async def test_workflow_database_initialization():
             assert result.run_id == "test_run"
             assert result.tasks_succeeded == 1
             assert result.tasks_failed == 0
+
+            # CRITICAL: Check workflow history for deadlock events
+            # Even if workflow succeeds, WorkflowTaskFailed events indicate problems
+            await assert_no_workflow_task_failures(env.client, workflow_id)
 
 
 # @pytest.mark.asyncio
