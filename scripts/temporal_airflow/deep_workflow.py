@@ -561,7 +561,8 @@ class ExecuteAirflowDagDeepWorkflow:
 
                         # Collect sync for batching
                         workflow.logger.info(f"[TRACE] Collecting sync for {ti_key}")
-                        completion_syncs.append(TaskStatusSync(
+                        workflow.logger.info(f"[TRACE] Building TaskStatusSync object")
+                        sync_obj = TaskStatusSync(
                             dag_id=ti_key[0],
                             task_id=ti_key[1],
                             run_id=self.run_id,
@@ -570,7 +571,10 @@ class ExecuteAirflowDagDeepWorkflow:
                             start_date=result.start_date,
                             end_date=result.end_date,
                             xcom_value=result.return_value if hasattr(result, 'return_value') else None,
-                        ))
+                        )
+                        workflow.logger.info(f"[TRACE] TaskStatusSync object created")
+                        completion_syncs.append(sync_obj)
+                        workflow.logger.info(f"[TRACE] TaskStatusSync appended to list")
 
                     except ActivityError as e:
                         workflow.logger.error(
@@ -610,17 +614,23 @@ class ExecuteAirflowDagDeepWorkflow:
                         )
                         self.tasks_failed += 1
 
+                workflow.logger.info(f"[TRACE] Done processing {len(completed_keys)} completed activities")
+
                 # Batch sync all completion states in single activity
                 if completion_syncs:
+                    workflow.logger.info(f"[TRACE] About to call sync_task_status_batch with {len(completion_syncs)} syncs")
                     await workflow.execute_activity(
                         sync_task_status_batch,
                         BatchTaskStatusSync(syncs=completion_syncs),
                         start_to_close_timeout=timedelta(seconds=30),
                     )
+                    workflow.logger.info(f"[TRACE] sync_task_status_batch complete")
 
                 # Remove completed from running
+                workflow.logger.info(f"[TRACE] Removing {len(completed_keys)} completed from running_activities")
                 for ti_key in completed_keys:
                     del running_activities[ti_key]
+                workflow.logger.info(f"[TRACE] Completed removal, running_activities now has {len(running_activities)}")
 
             else:
                 # No running activities, sleep before checking for new work
