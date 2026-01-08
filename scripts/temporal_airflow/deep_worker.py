@@ -33,8 +33,12 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
+import signal
 import sys
+import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -63,6 +67,42 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Enable faulthandler for thread dumps on SIGUSR1
+# Usage: kill -USR1 <pid> to dump all thread stacks
+faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+logger.info("Faulthandler enabled: send SIGUSR1 to dump thread stacks")
+
+
+def dump_all_threads(signum=None, frame=None):
+    """Dump stack traces of all threads. Can be called as signal handler."""
+    print("\n" + "=" * 60, file=sys.stderr)
+    print("THREAD DUMP", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    for thread_id, stack_frame in sys._current_frames().items():
+        thread_name = next(
+            (t.name for t in threading.enumerate() if t.ident == thread_id),
+            f"Thread-{thread_id}"
+        )
+        print(f"\n--- {thread_name} (id={thread_id}) ---", file=sys.stderr)
+        traceback.print_stack(stack_frame, file=sys.stderr)
+    print("=" * 60 + "\n", file=sys.stderr)
+
+
+# Also register SIGUSR2 for Python-level thread dump (more readable)
+signal.signal(signal.SIGUSR2, dump_all_threads)
+logger.info("Thread dump on SIGUSR2 enabled")
+
+
+class SlowCallbackDumpHandler(logging.Handler):
+    """Logging handler that dumps threads when asyncio detects slow callbacks."""
+
+    def emit(self, record):
+        msg = record.getMessage()
+        # asyncio logs: "Executing <callback> took X.XXX seconds"
+        if "took" in msg and "seconds" in msg:
+            print(f"\n!!! SLOW CALLBACK DETECTED: {msg}", file=sys.stderr)
+            dump_all_threads()
 
 
 def _prewarm_imports() -> None:
@@ -135,6 +175,18 @@ def _prewarm_imports() -> None:
 
 async def main() -> None:
     """Start Temporal worker for Airflow deep integration."""
+    # Enable asyncio debug mode to detect slow callbacks
+    # This logs warnings when a callback takes > slow_callback_duration (default 0.1s)
+    loop = asyncio.get_event_loop()
+    loop.set_debug(True)
+    loop.slow_callback_duration = 0.5  # Log callbacks taking > 500ms
+
+    # Attach handler to dump threads on slow callback detection
+    asyncio_logger = logging.getLogger("asyncio")
+    asyncio_logger.setLevel(logging.WARNING)
+    asyncio_logger.addHandler(SlowCallbackDumpHandler())
+    logger.info("Asyncio debug mode enabled (slow_callback_duration=500ms, auto thread dump)")
+
     # Pre-warm imports
     _prewarm_imports()
 

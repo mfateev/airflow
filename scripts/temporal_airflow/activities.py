@@ -210,9 +210,12 @@ def run_airflow_task(input: ActivityTaskInput) -> TaskExecutionResult:
 
     This is how LocalExecutor and all production executors work!
     """
+    import threading
+    current_thread = threading.current_thread()
     activity.logger.info(
         f"Starting task execution: {input.dag_id}.{input.task_id} "
-        f"(run_id={input.run_id}, try={input.try_number}, dag_path={input.dag_rel_path})"
+        f"(run_id={input.run_id}, try={input.try_number}, dag_path={input.dag_rel_path}) "
+        f"[THREAD: {current_thread.name} id={current_thread.ident}]"
     )
 
     start_time = datetime.now(timezone.utc)
