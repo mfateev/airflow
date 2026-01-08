@@ -360,38 +360,28 @@ class ExecuteAirflowDagDeepWorkflow:
         This only updates the local in-memory DB. Sync to real Airflow DB
         is done via batched sync_task_status_batch activity.
         """
-        workflow.logger.info(f"[TRACE] _update_local_task_state START for {ti_key}")
-        workflow.logger.info(f"[TRACE] _update_local_task_state: creating session")
         session = self.sessionFactory()
-        workflow.logger.info(f"[TRACE] _update_local_task_state: session created")
         try:
-            workflow.logger.info(f"[TRACE] _update_local_task_state: querying TaskInstance")
             ti = session.query(TaskInstance).filter(
                 TaskInstance.dag_id == ti_key[0],
                 TaskInstance.task_id == ti_key[1],
                 TaskInstance.run_id == ti_key[2],
                 TaskInstance.map_index == ti_key[3],
             ).one()
-            workflow.logger.info(f"[TRACE] _update_local_task_state: query complete")
 
             # Update in in-workflow DB (same as standalone)
-            workflow.logger.info(f"[TRACE] _update_local_task_state: setting state={result.state}")
             ti.state = result.state
             ti.start_date = result.start_date
             ti.end_date = result.end_date
-            workflow.logger.info(f"[TRACE] _update_local_task_state: state set, committing")
 
             session.commit()
-            workflow.logger.info(f"[TRACE] _update_local_task_state: commit complete")
 
             workflow.logger.info(
                 f"Updated local task {ti_key} to state {ti.state} "
                 f"(duration: {result.end_date - result.start_date})"
             )
         finally:
-            workflow.logger.info(f"[TRACE] _update_local_task_state: closing session")
             session.close()
-            workflow.logger.info(f"[TRACE] _update_local_task_state END for {ti_key}")
 
     async def _scheduling_loop(self, dag_run_id: int) -> str:
         """
@@ -417,15 +407,10 @@ class ExecuteAirflowDagDeepWorkflow:
                 f"{len(running_activities)} activities running"
             )
 
-            workflow.logger.info(f"[TRACE] scheduling_loop: creating session")
             session = self.sessionFactory()
-            workflow.logger.info(f"[TRACE] scheduling_loop: session created")
             try:
-                workflow.logger.info(f"[TRACE] scheduling_loop: querying DagRun id={dag_run_id}")
                 dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
-                workflow.logger.info(f"[TRACE] scheduling_loop: DagRun query complete, state={dag_run.state}")
                 dag_run.dag = self.dag  # Restore DAG reference
-                workflow.logger.info(f"[TRACE] scheduling_loop: DAG reference set")
 
                 # Check if complete
                 if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
@@ -435,25 +420,18 @@ class ExecuteAirflowDagDeepWorkflow:
 
                 # CRITICAL: Use Airflow's native update_state() method
                 # This internally uses TriggerRuleDep to evaluate trigger rules!
-                workflow.logger.info(f"[TRACE] scheduling_loop: calling dag_run.update_state()")
                 schedulable_tis, callback = dag_run.update_state(
                     session=session,
                     execute_callbacks=False,
                 )
-                workflow.logger.info(f"[TRACE] scheduling_loop: update_state() complete, schedulable={len(schedulable_tis) if schedulable_tis else 0}")
 
                 # Commit state changes
-                workflow.logger.info(f"[TRACE] scheduling_loop: committing state changes")
                 session.commit()
-                workflow.logger.info(f"[TRACE] scheduling_loop: commit complete")
 
                 # Start activities for new schedulable tasks
                 if schedulable_tis:
-                    workflow.logger.info(f"[TRACE] scheduling_loop: calling schedule_tis for {len(schedulable_tis)} tasks")
                     dag_run.schedule_tis(schedulable_tis, session=session)
-                    workflow.logger.info(f"[TRACE] scheduling_loop: schedule_tis complete, committing")
                     session.commit()
-                    workflow.logger.info(f"[TRACE] scheduling_loop: schedule_tis commit complete")
 
                     # NOTE: We skip syncing QUEUED state to reduce round-trips.
                     # Tasks go directly from None → Running → Success/Failed in Airflow UI.
@@ -524,47 +502,34 @@ class ExecuteAirflowDagDeepWorkflow:
                 )
 
                 # Process completed activities and collect syncs for batching
-                workflow.logger.info(f"[TRACE] Starting to process {len(done)} completed activities")
                 completion_syncs = []
                 completed_keys = []
 
-                for idx, completed in enumerate(done):
-                    workflow.logger.info(f"[TRACE] Finding ti_key for completed activity {idx+1}/{len(done)}")
+                for completed in done:
                     ti_key = next(k for k, v in running_activities.items() if v == completed)
                     completed_keys.append(ti_key)
 
-                    workflow.logger.info(f"Processing completed activity for {ti_key}")
-
                     try:
-                        workflow.logger.info(f"[TRACE] Getting result for {ti_key}")
                         result: TaskExecutionResult = completed.result()
                         workflow.logger.info(
                             f"Activity completed for {ti_key}: state={result.state}"
                         )
 
                         # Store XCom in workflow state
-                        workflow.logger.info(f"[TRACE] Storing XCom for {ti_key}")
                         if result.xcom_data:
                             self.xcom_store[ti_key] = result.xcom_data
-                        workflow.logger.info(f"[TRACE] XCom stored for {ti_key}")
 
                         # Update task counts
-                        workflow.logger.info(f"[TRACE] Updating task counts for {ti_key}")
                         if result.state == TaskInstanceState.SUCCESS:
                             self.tasks_succeeded += 1
                         elif result.state == TaskInstanceState.FAILED:
                             self.tasks_failed += 1
-                        workflow.logger.info(f"[TRACE] Task counts updated for {ti_key}")
 
                         # Update in-workflow DB (local)
-                        workflow.logger.info(f"[TRACE] Calling _update_local_task_state for {ti_key}")
                         await self._update_local_task_state(ti_key, result)
-                        workflow.logger.info(f"[TRACE] _update_local_task_state complete for {ti_key}")
 
                         # Collect sync for batching
-                        workflow.logger.info(f"[TRACE] Collecting sync for {ti_key}")
-                        workflow.logger.info(f"[TRACE] Building TaskStatusSync object")
-                        sync_obj = TaskStatusSync(
+                        completion_syncs.append(TaskStatusSync(
                             dag_id=ti_key[0],
                             task_id=ti_key[1],
                             run_id=self.run_id,
@@ -573,10 +538,7 @@ class ExecuteAirflowDagDeepWorkflow:
                             start_date=result.start_date,
                             end_date=result.end_date,
                             xcom_value=result.return_value if hasattr(result, 'return_value') else None,
-                        )
-                        workflow.logger.info(f"[TRACE] TaskStatusSync object created")
-                        completion_syncs.append(sync_obj)
-                        workflow.logger.info(f"[TRACE] TaskStatusSync appended to list")
+                        ))
 
                     except ActivityError as e:
                         workflow.logger.error(
@@ -616,23 +578,17 @@ class ExecuteAirflowDagDeepWorkflow:
                         )
                         self.tasks_failed += 1
 
-                workflow.logger.info(f"[TRACE] Done processing {len(completed_keys)} completed activities")
-
                 # Batch sync all completion states in single activity
                 if completion_syncs:
-                    workflow.logger.info(f"[TRACE] About to call sync_task_status_batch with {len(completion_syncs)} syncs")
                     await workflow.execute_activity(
                         sync_task_status_batch,
                         BatchTaskStatusSync(syncs=completion_syncs),
                         start_to_close_timeout=timedelta(seconds=30),
                     )
-                    workflow.logger.info(f"[TRACE] sync_task_status_batch complete")
 
                 # Remove completed from running
-                workflow.logger.info(f"[TRACE] Removing {len(completed_keys)} completed from running_activities")
                 for ti_key in completed_keys:
                     del running_activities[ti_key]
-                workflow.logger.info(f"[TRACE] Completed removal, running_activities now has {len(running_activities)}")
 
             else:
                 # No running activities, sleep before checking for new work
