@@ -257,6 +257,7 @@ class ExecuteAirflowDagDeepWorkflow:
                 load_serialized_dag,
                 LoadSerializedDagInput(dag_id=input.dag_id),
                 start_to_close_timeout=timedelta(seconds=30),
+                summary=f"Load DAG: {input.dag_id}",
             )
             # Note: from_dict() is fast (<1ms) when imports are pre-warmed
             # See deep_worker.py _prewarm_imports() which warms up deserialization
@@ -281,6 +282,7 @@ class ExecuteAirflowDagDeepWorkflow:
                         run_id=self.run_id,
                     ),
                     start_to_close_timeout=timedelta(seconds=30),
+                    summary=f"Ensure TIs: {input.dag_id}/{self.run_id[:8]}",
                 )
             else:
                 # Create new DagRun in real Airflow DB
@@ -292,6 +294,7 @@ class ExecuteAirflowDagDeepWorkflow:
                         conf=input.conf,
                     ),
                     start_to_close_timeout=timedelta(seconds=30),
+                    summary=f"Create DagRun: {input.dag_id}",
                 )
                 self.run_id = result.run_id
                 workflow.logger.info(f"Created DagRun in real DB: {self.run_id}")
@@ -320,6 +323,7 @@ class ExecuteAirflowDagDeepWorkflow:
                     end_date=end_time,
                 ),
                 start_to_close_timeout=timedelta(seconds=30),
+                summary=f"Sync DagRun: {input.dag_id} → {final_state}",
             )
 
             # If DAG failed, raise ApplicationError
@@ -474,6 +478,7 @@ class ExecuteAirflowDagDeepWorkflow:
                             task_queue=activity_queue,
                             start_to_close_timeout=timedelta(hours=2),
                             heartbeat_timeout=timedelta(minutes=5),
+                            summary=f"Task: {ti.dag_id}.{ti.task_id}",
                         )
 
                         running_activities[ti_key] = handle
@@ -580,10 +585,13 @@ class ExecuteAirflowDagDeepWorkflow:
 
                 # Batch sync all completion states in single activity
                 if completion_syncs:
+                    task_ids = ", ".join(s.task_id for s in completion_syncs[:3])
+                    summary_suffix = f" +{len(completion_syncs)-3} more" if len(completion_syncs) > 3 else ""
                     await workflow.execute_activity(
                         sync_task_status_batch,
                         BatchTaskStatusSync(syncs=completion_syncs),
                         start_to_close_timeout=timedelta(seconds=30),
+                        summary=f"Sync {len(completion_syncs)} tasks: {task_ids}{summary_suffix}",
                     )
 
                 # Remove completed from running
