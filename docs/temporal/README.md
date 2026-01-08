@@ -18,14 +18,14 @@ This guide explains how to run Apache Airflow with Temporal as the execution eng
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key difference:** No scheduler needed for manual triggers. When the API server
-creates a DagRun, a configured orchestrator hook routes it directly to Temporal.
+**Key difference:** When the API server (or scheduler) creates a DagRun, the configured `TemporalOrchestrator` routes it directly to Temporal for execution.
 
 **Benefits:**
 - Temporal handles retries, timeouts, and failure recovery
 - Full visibility in Temporal UI for debugging workflows
-- Airflow UI shows familiar DAG status (synced from Temporal)
-- Connections and Variables still work from Airflow DB
+- Airflow UI shows familiar DAG status (synced from Temporal in real-time)
+- Connections and Variables work from Airflow DB
+- Concurrent DAG execution tested and verified
 
 ## Quick Start
 
@@ -116,7 +116,7 @@ Username: `admin`, password: value from the JSON output above.
 
 ### Option A: Via Airflow UI (Recommended)
 
-The docker-compose includes a scheduler with the Temporal orchestrator configured. DAGs triggered from the UI are automatically executed via Temporal.
+The docker-compose includes the Temporal orchestrator configured on both the API server and scheduler. DAGs triggered from the UI are automatically executed via Temporal.
 
 1. Navigate to http://localhost:8080
 2. Find your DAG (e.g., `example_dag`)
@@ -126,7 +126,7 @@ The docker-compose includes a scheduler with the Temporal orchestrator configure
 **What happens behind the scenes:**
 1. Airflow creates a DagRun in the database
 2. The `TemporalOrchestrator` intercepts the DagRun
-3. A Temporal workflow is started to execute the DAG
+3. A Temporal workflow (`execute_airflow_dag_deep`) is started
 4. Task status is synced back to Airflow DB for UI visibility
 
 ### Option B: Via Airflow CLI
@@ -203,31 +203,56 @@ The status is synced from Temporal in real-time via sync activities.
 | `postgres` | 5432 | Airflow metadata database |
 | `airflow-apiserver` | 8080 | Airflow UI/API - routes DagRuns to Temporal |
 | `airflow-dag-processor` | - | Parses DAG files, serializes to DB |
-| `airflow-scheduler` | - | *Optional* - for timetable-based scheduling |
+| `airflow-scheduler` | - | Evaluates timetables, creates scheduled DagRuns |
 | `temporal-worker` | - | Executes Temporal workflows/activities |
+
+### Components
+
+```
+scripts/temporal_airflow/
+├── orchestrator.py      # TemporalOrchestrator - routes DagRuns to Temporal
+├── deep_workflow.py     # ExecuteAirflowDagDeepWorkflow - main workflow
+├── deep_worker.py       # Worker startup with import pre-warming
+├── activities.py        # run_airflow_task - executes individual tasks
+├── sync_activities.py   # DB sync activities for Airflow UI visibility
+├── models.py            # Pydantic models for workflow/activity I/O
+├── client_config.py     # Temporal client configuration
+└── submit_dag.py        # CLI for direct DAG submission
+```
 
 ### Data Flow
 
 ```
 1. DAG Trigger (UI/CLI/API)
-   └─→ API Server calls dag.create_dagrun()
-       └─→ Orchestrator hook starts Temporal workflow (async)
-           └─→ API returns immediately with DagRun info
+   └─→ API Server/Scheduler calls dag.create_dagrun()
+       └─→ TemporalOrchestrator.start_dagrun()
+           └─→ Starts Temporal workflow (async)
+               └─→ Returns immediately with DagRun info
 
 2. Temporal Workflow Execution (async, in background)
    ├─→ load_serialized_dag (reads DAG structure from Airflow DB)
+   ├─→ Creates in-workflow SQLite DB for Airflow's scheduling logic
    ├─→ ensure_task_instances (creates TaskInstance records in DB)
-   ├─→ For each task (parallel when dependencies allow):
-   │   ├─→ sync_task_status (mark queued in Airflow DB)
-   │   ├─→ run_airflow_task (execute the task)
-   │   └─→ sync_task_status (mark success/failed in Airflow DB)
+   ├─→ Scheduling loop using dag_run.update_state():
+   │   ├─→ Airflow's TriggerRuleDep evaluates which tasks are ready
+   │   ├─→ run_airflow_task (execute task in ThreadPoolExecutor)
+   │   └─→ sync_task_status_batch (batch sync to Airflow DB)
    └─→ sync_dagrun_status (mark DagRun complete in Airflow DB)
 
 3. Airflow UI reads status from DB (continuously updated by workflow)
 ```
 
-**Note:** The scheduler is only needed for timetable-based scheduling
-(e.g., `schedule="@daily"`). Manual triggers go through the API Server directly.
+### Key Design Decisions
+
+1. **In-Workflow Database**: Each workflow creates an in-memory SQLite database to run Airflow's native scheduling logic (`dag_run.update_state()`, `TriggerRuleDep`). This ensures trigger rules work correctly.
+
+2. **Sandboxed=False**: The workflow runs with `sandboxed=False` to allow Airflow's complex module system to work without serialization issues.
+
+3. **ThreadPoolExecutor for Activities**: Sync activities (database operations) run in a ThreadPoolExecutor to avoid blocking Temporal's event loop.
+
+4. **Import Pre-warming**: The worker pre-warms Python imports and deserializes a sample DAG at startup to avoid Temporal's deadlock detector triggering on cold imports (~1.4s).
+
+5. **Batched Syncs**: Task status updates are batched into single DB transactions to reduce round-trips.
 
 ## Configuration
 
@@ -339,6 +364,17 @@ docker rm -f temporal postgres airflow-apiserver airflow-dag-processor airflow-s
    docker-compose -f docker-compose-temporal.yaml logs temporal-worker | grep -i error
    ```
 
+### Deadlock Errors (TMPRL1101)
+
+If you see deadlock warnings like "Potential deadlock detected", this is usually caused by:
+1. Cold imports during first execution (resolved by pre-warming)
+2. Stale worker state from previous runs
+
+**Fix:** Restart the worker container:
+```bash
+docker restart temporal-worker
+```
+
 ### Connection/Variable Not Found
 
 Connections and Variables are read from Airflow DB during task execution. Add them via:
@@ -356,6 +392,10 @@ docker exec airflow-apiserver airflow connections add my_conn --conn-type postgr
 ### Running Tests
 
 ```bash
+# Run temporal_airflow tests
+docker exec temporal-worker python -m pytest \
+    /opt/airflow/scripts/temporal_airflow/tests/ -v
+
 # Run E2E tests with real Temporal server
 docker exec airflow-apiserver python -m pytest \
     /opt/airflow/scripts/temporal_airflow/tests/test_airflow_user_experience.py -v
@@ -367,25 +407,37 @@ After making changes to `scripts/temporal_airflow/`:
 
 ```bash
 # Copy updated files
-cp -r /path/to/airflow/scripts/temporal_airflow scripts/
+docker cp scripts/temporal_airflow/. temporal-worker:/opt/airflow/scripts/temporal_airflow/
 
 # Restart worker
-docker-compose -f docker-compose-temporal.yaml restart temporal-worker
+docker restart temporal-worker
+```
+
+### Stress Testing
+
+The integration supports concurrent DAG execution:
+
+```bash
+# Run multiple DAGs concurrently via Temporal CLI
+for i in {1..5}; do
+  docker exec temporal-worker python /opt/airflow/scripts/temporal_airflow/submit_dag.py \
+      example_dag --dag-file dags/example_dag.py &
+done
+wait
 ```
 
 ## Current Limitations
 
 1. **Development Mode Only**: The docker-compose uses Temporal's dev server with SQLite. For production, use Temporal Cloud or a production Temporal deployment with PostgreSQL.
 
-2. **No Timetable Scheduling Yet**: Timetable-based scheduling (e.g., `schedule="@daily"`) is not yet supported. The scheduler's timetable evaluation doesn't trigger the orchestrator. Use `schedule=None` and trigger DAGs manually.
+2. **No Sensors/Triggers**: Deferrable operators and sensors are not yet implemented in the Temporal integration.
 
-3. **No Sensors/Triggers**: Deferrable operators and sensors are not yet implemented in the Temporal integration.
-
-4. **Experimental**: This is a prototype integration. Some Airflow features may not work as expected. Report issues at the GitHub repository.
+3. **Experimental**: This is a prototype integration. Some Airflow features may not work as expected. Report issues at the GitHub repository.
 
 ## Further Reading
 
 - [Deep Integration Design](DEEP_INTEGRATION_DESIGN.md) - Architecture details
 - [Standalone Mode](STANDALONE_MODE.md) - Running without Airflow DB
+- [Implementation Plan](DEEP_INTEGRATION_IMPLEMENTATION_PLAN.md) - Development roadmap
 - [Temporal Documentation](https://docs.temporal.io/)
 - [Airflow Documentation](https://airflow.apache.org/docs/)
