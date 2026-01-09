@@ -29,7 +29,7 @@ from temporal_airflow.models import (
     DagExecutionInput,
     DagExecutionResult,
     DagExecutionFailureDetails,
-    ActivityTaskInput,  # New executor pattern model
+    ActivityTaskInput,
     TaskExecutionResult,
     TaskExecutionFailureDetails,
 )
@@ -65,7 +65,9 @@ class ExecuteAirflowDagWorkflow:
         self.connections: dict[str, dict[str, Any]] | None = None
         self.variables: dict[str, str] | None = None
 
-        # TODO Phase 5: Add pool_usage tracking
+        # Task tracking
+        self.tasks_succeeded: int = 0
+        self.tasks_failed: int = 0
 
     @workflow.run
     async def run(self, input: DagExecutionInput) -> DagExecutionResult:
@@ -115,19 +117,6 @@ class ExecuteAirflowDagWorkflow:
 
             end_time = workflow.now()
 
-            # Commit 7: Count task results
-            session = self.sessionFactory()
-            try:
-                task_instances = session.query(TaskInstance).filter(
-                    TaskInstance.dag_id == input.dag_id,
-                    TaskInstance.run_id == input.run_id,
-                ).all()
-
-                tasks_succeeded = sum(1 for ti in task_instances if ti.state == TaskInstanceState.SUCCESS)
-                tasks_failed = sum(1 for ti in task_instances if ti.state == TaskInstanceState.FAILED)
-            finally:
-                session.close()
-
             # If DAG failed, raise ApplicationError with structured details
             if final_state == "failed":
                 failure_details = DagExecutionFailureDetails(
@@ -135,9 +124,9 @@ class ExecuteAirflowDagWorkflow:
                     run_id=input.run_id,
                     start_date=start_time,
                     end_date=end_time,
-                    tasks_succeeded=tasks_succeeded,
-                    tasks_failed=tasks_failed,
-                    error_message=f"DAG execution failed: {tasks_failed} task(s) failed",
+                    tasks_succeeded=self.tasks_succeeded,
+                    tasks_failed=self.tasks_failed,
+                    error_message=f"DAG execution failed: {self.tasks_failed} task(s) failed",
                 )
                 raise ApplicationError(
                     f"DAG execution failed: {input.dag_id} / {input.run_id}",
@@ -153,8 +142,8 @@ class ExecuteAirflowDagWorkflow:
                 run_id=input.run_id,
                 start_date=start_time,
                 end_date=end_time,
-                tasks_succeeded=tasks_succeeded,
-                tasks_failed=tasks_failed,
+                tasks_succeeded=self.tasks_succeeded,
+                tasks_failed=self.tasks_failed,
             )
 
         finally:
@@ -270,13 +259,12 @@ class ExecuteAirflowDagWorkflow:
 
         return upstream_results if upstream_results else None
 
-    async def _handle_activity_result(self, ti_key: tuple, result: TaskExecutionResult):
+    async def _update_local_task_state(self, ti_key: tuple, result: TaskExecutionResult):
         """
-        Update TaskInstance based on activity result.
+        Update TaskInstance in IN-WORKFLOW DB based on activity result.
 
-        Design Note (Decision 4):
-        - result.state is already TaskInstanceState enum
-        - Direct assignment works (no conversion needed)
+        This only updates the local in-memory DB. For standalone mode,
+        there is no external DB to sync to.
         """
         session = self.sessionFactory()
         try:
@@ -287,7 +275,6 @@ class ExecuteAirflowDagWorkflow:
                 TaskInstance.map_index == ti_key[3],
             ).one()
 
-            # Decision 4: Direct enum assignment (Pydantic handled serialization)
             ti.state = result.state
             ti.start_date = result.start_date
             ti.end_date = result.end_date
@@ -295,228 +282,272 @@ class ExecuteAirflowDagWorkflow:
             session.commit()
 
             workflow.logger.info(
-                f"Updated task {ti_key} to state {ti.state} "
+                f"Updated local task {ti_key} to state {ti.state} "
                 f"(duration: {result.end_date - result.start_date})"
             )
         finally:
             session.close()
 
-    async def _scheduling_loop(self, dag_run_id: int) -> str:
+    def _check_dag_completion(self, dag_run_id: int) -> str | None:
         """
-        Main scheduling loop.
-
-        Design Notes:
-        - Decision 2: Direct activity management (no executor)
-        - Decision 6: Accepts sync calls (ORM queries, update_state)
+        Check if DAG run is complete.
 
         Returns:
-            Final DAG run state
+            Final state string ("success" or "failed") if complete, None otherwise.
         """
-        # Track running activities: ti_key -> ActivityHandle
-        running_activities: dict[tuple, Any] = {}
-        final_state: str | None = None
+        session = self.sessionFactory()
+        try:
+            dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
+            if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
+                return dag_run.state.value if hasattr(dag_run.state, 'value') else str(dag_run.state)
+            return None
+        finally:
+            session.close()
 
-        max_iterations = 20  # TODO: Real safety limit.
+    def _get_and_schedule_ready_tasks(self, dag_run_id: int) -> list[TaskInstance]:
+        """
+        Find schedulable tasks using Airflow's native logic and mark them scheduled.
 
-        for iteration in range(max_iterations):
-            workflow.logger.info(
-                f"Scheduling loop iteration {iteration + 1}: "
-                f"{len(running_activities)} activities running"
+        Uses dag_run.update_state() which internally calls TriggerRuleDep
+        for trigger rule evaluation.
+
+        Returns:
+            List of TaskInstance objects ready to execute.
+        """
+        session = self.sessionFactory()
+        try:
+            dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
+            dag_run.dag = self.dag
+
+            # CRITICAL: Use Airflow's native update_state() method
+            schedulable_tis, _ = dag_run.update_state(
+                session=session,
+                execute_callbacks=False,
             )
+            session.commit()
 
-            # Decision 6: Sync calls acceptable (fast, in-memory DB)
-            session = self.sessionFactory()
-            try:
-                dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
-                dag_run.dag = self.dag  # Restore DAG reference
-
-                # Check if complete
-                if dag_run.state in (DagRunState.SUCCESS, DagRunState.FAILED):
-                    workflow.logger.info(f"DAG completed: {dag_run.state}")
-                    # Handle both enum and string (SQLAlchemy may return either)
-                    final_state = dag_run.state.value if hasattr(dag_run.state, 'value') else str(dag_run.state)
-                    # Break from try block to trigger finally, then return
-                    break
-
-                # Commit 5: Update state and get schedulable tasks
-                schedulable_tis, callback = dag_run.update_state(
-                    session=session,
-                    execute_callbacks=False,  # We handle callbacks in Phase 5
-                )
-
-                # Commit state changes (including completion state)
+            if schedulable_tis:
+                dag_run.schedule_tis(schedulable_tis, session=session)
                 session.commit()
 
-                # Start activities for new schedulable tasks
-                if schedulable_tis:
-                    dag_run.schedule_tis(schedulable_tis, session=session)
-                    session.commit()
+            return schedulable_tis or []
+        finally:
+            session.close()
 
-                    for ti in schedulable_tis:
-                        ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
+    def _start_task_activity(self, ti: TaskInstance, dag_run_id: int) -> tuple[tuple, Any]:
+        """
+        Start a Temporal activity for a single task instance.
 
-                        # TODO Phase 5: Check pool availability
+        Args:
+            ti: TaskInstance to execute
+            dag_run_id: DAG run database ID
 
-                        # Executor Pattern: Pass DAG file path instead of serialized operator
-                        # Activities will load DAG from file and extract task
-                        task = self.dag.get_task(ti.task_id)
+        Returns:
+            Tuple of (ti_key, activity_handle)
+        """
+        ti_key = (ti.dag_id, ti.task_id, ti.run_id, ti.map_index)
 
-                        # Gather upstream XCom
-                        upstream_results = self._get_upstream_xcom(ti, task)
+        task = self.dag.get_task(ti.task_id)
+        upstream_results = self._get_upstream_xcom(ti, task)
+        activity_queue = workflow.info().task_queue
 
-                        # Create DAG file path (relative to DAGS_FOLDER)
-                        # TODO Phase 4: Get real DAG file path from DagModel or config
-                        # For now, use simple pattern: {dag_id}.py (DAGS_FOLDER already includes "dags")
-                        dag_rel_path = f"{ti.dag_id}.py"
+        # Get logical date from dag_run
+        logical_date = self._get_logical_date(dag_run_id)
 
-                        # Start activity directly (Decision 2)
-                        # TODO Phase 5: Implement queue routing (Decision 9)
-                        # For now, always use workflow's task queue to ensure worker picks up activities
-                        activity_queue = workflow.info().task_queue
+        # Create DAG file path (relative to DAGS_FOLDER)
+        dag_rel_path = f"{ti.dag_id}.py"
 
-                        workflow.logger.info(
-                            f"Starting activity for {ti_key} on queue '{activity_queue}' "
-                            f"(dag_rel_path={dag_rel_path})"
-                        )
+        workflow.logger.info(
+            f"Starting activity for {ti_key} on queue '{activity_queue}'"
+        )
 
-                        handle = workflow.start_activity(
-                            run_airflow_task,
-                            arg=ActivityTaskInput(
-                                # Task metadata (JSON-serializable)
-                                dag_id=ti.dag_id,
-                                task_id=ti.task_id,
-                                run_id=ti.run_id,
-                                logical_date=dag_run.logical_date,
-                                try_number=ti.try_number,
-                                map_index=ti.map_index,
-                                # DAG file path (instead of serialized operator)
-                                dag_rel_path=dag_rel_path,
-                                # Execution context
-                                upstream_results=upstream_results,
-                                queue=ti.queue,
-                                pool_slots=ti.pool_slots,
-                                # Standalone mode: pass connections/variables to activity
-                                connections=self.connections,
-                                variables=self.variables,
-                            ),
-                            task_queue=activity_queue,  # Use workflow's queue for now
-                            start_to_close_timeout=timedelta(hours=2),
-                            heartbeat_timeout=timedelta(minutes=5),
-                        )
+        handle = workflow.start_activity(
+            run_airflow_task,
+            arg=ActivityTaskInput(
+                dag_id=ti.dag_id,
+                task_id=ti.task_id,
+                run_id=ti.run_id,
+                logical_date=logical_date,
+                try_number=ti.try_number,
+                map_index=ti.map_index,
+                dag_rel_path=dag_rel_path,
+                upstream_results=upstream_results,
+                queue=ti.queue,
+                pool_slots=ti.pool_slots,
+                connections=self.connections,
+                variables=self.variables,
+            ),
+            task_queue=activity_queue,
+            start_to_close_timeout=timedelta(hours=2),
+            heartbeat_timeout=timedelta(minutes=5),
+            summary=f"Task: {ti.dag_id}.{ti.task_id}",
+        )
 
-                        running_activities[ti_key] = handle
+        return ti_key, handle
 
-                        # TODO Phase 5: Track pool usage
+    async def _process_activity_result(
+        self,
+        completed: Any,
+        ti_key: tuple,
+    ) -> None:
+        """
+        Process a completed activity and update workflow state.
 
-                        workflow.logger.info(f"Activity handle created for {ti_key}")
+        Args:
+            completed: Completed activity handle
+            ti_key: Task instance key tuple
+        """
+        try:
+            result: TaskExecutionResult = completed.result()
+            workflow.logger.info(
+                f"Activity completed for {ti_key}: state={result.state}"
+            )
 
-            finally:
-                session.close()
+            # Store XCom in workflow state
+            if result.xcom_data:
+                self.xcom_store[ti_key] = result.xcom_data
 
-            # Commit 7: Wait for any activities to complete
-            if running_activities:
-                workflow.logger.info(
-                    f"Waiting for {len(running_activities)} activities to complete..."
+            # Update task counts
+            if result.state == TaskInstanceState.SUCCESS:
+                self.tasks_succeeded += 1
+            elif result.state == TaskInstanceState.FAILED:
+                self.tasks_failed += 1
+
+            # Update in-workflow DB
+            await self._update_local_task_state(ti_key, result)
+
+        except ActivityError as e:
+            workflow.logger.error(
+                f"ActivityError for {ti_key}: {e.message}"
+            )
+            self.tasks_failed += 1
+
+            # Check if the cause is an ApplicationError with details
+            if isinstance(e.cause, ApplicationError) and e.cause.details:
+                failure_data = e.cause.details[0]
+                if isinstance(failure_data, dict):
+                    failure_details = TaskExecutionFailureDetails(**failure_data)
+                    failed_result = TaskExecutionResult(
+                        dag_id=failure_details.dag_id,
+                        task_id=failure_details.task_id,
+                        run_id=failure_details.run_id,
+                        try_number=failure_details.try_number,
+                        state=TaskInstanceState.FAILED,
+                        start_date=failure_details.start_date,
+                        end_date=failure_details.end_date,
+                        error_message=failure_details.error_message,
+                    )
+                    await self._update_local_task_state(ti_key, failed_result)
+                    return
+
+            # Fallback: create minimal failed result
+            failed_result = TaskExecutionResult(
+                dag_id=ti_key[0],
+                task_id=ti_key[1],
+                run_id=ti_key[2],
+                try_number=1,
+                state=TaskInstanceState.FAILED,
+                start_date=workflow.now(),
+                end_date=workflow.now(),
+                error_message=str(e.message),
+            )
+            await self._update_local_task_state(ti_key, failed_result)
+
+        except Exception as e:
+            workflow.logger.error(
+                f"Unexpected error for {ti_key}: {type(e).__name__}: {e}"
+            )
+            self.tasks_failed += 1
+
+    async def _await_and_process_completions(
+        self,
+        running_activities: dict[tuple, Any],
+    ) -> list[tuple]:
+        """
+        Wait for activities to complete and process results.
+
+        Args:
+            running_activities: Dict of ti_key -> activity handle
+
+        Returns:
+            List of completed ti_keys to remove from running_activities
+        """
+        workflow.logger.info(
+            f"Waiting for {len(running_activities)} activities..."
+        )
+
+        done, pending = await workflow.wait(
+            running_activities.values(),
+            return_when=asyncio.FIRST_COMPLETED
+        )
+
+        workflow.logger.info(
+            f"Activity wait: {len(done)} done, {len(pending)} pending"
+        )
+
+        # Process completions
+        completed_keys = []
+
+        for completed in done:
+            ti_key = next(k for k, v in running_activities.items() if v == completed)
+            completed_keys.append(ti_key)
+            await self._process_activity_result(completed, ti_key)
+
+        return completed_keys
+
+    def _get_logical_date(self, dag_run_id: int) -> datetime:
+        """Get the logical date for a DAG run."""
+        session = self.sessionFactory()
+        try:
+            dag_run = session.query(DagRun).filter(DagRun.id == dag_run_id).one()
+            return dag_run.logical_date
+        finally:
+            session.close()
+
+    async def _scheduling_loop(self, dag_run_id: int) -> str:
+        """
+        Main scheduling loop using Airflow's native logic.
+
+        Returns:
+            Final DAG run state ("success" or "failed")
+        """
+        running_activities: dict[tuple, Any] = {}
+
+        iteration = 0
+        while True:
+            iteration += 1
+            workflow.logger.info(
+                f"Scheduling iteration {iteration}: "
+                f"{len(running_activities)} running"
+            )
+
+            # Find schedulable tasks (calls update_state() which may mark DAG complete)
+            schedulable_tis = self._get_and_schedule_ready_tasks(dag_run_id)
+
+            # Check if DAG is complete (must be AFTER update_state() call)
+            final_state = self._check_dag_completion(dag_run_id)
+            if final_state:
+                workflow.logger.info(f"DAG completed: {final_state}")
+                return final_state
+
+            # Start activities for schedulable tasks
+            for ti in schedulable_tis:
+                ti_key, handle = self._start_task_activity(ti, dag_run_id)
+                running_activities[ti_key] = handle
+
+            # Fail if stuck (no activities to wait for)
+            # TODO: When sensors/deferrable operators are implemented,
+            # wait for external events (Temporal signals) instead of failing.
+            if not running_activities:
+                raise ApplicationError(
+                    f"Workflow stuck: no running activities but DAG not complete. "
+                    f"DAG: {self.dag.dag_id}, "
+                    f"succeeded: {self.tasks_succeeded}, failed: {self.tasks_failed}",
+                    type="WorkflowStuck",
+                    non_retryable=True,
                 )
 
-                # Use workflow.wait() instead of asyncio.wait() for determinism
-                # asyncio.wait() internally uses set() which is non-deterministic
-                done, pending = await workflow.wait(
-                    running_activities.values(),
-                    timeout=5,
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-
-                workflow.logger.info(
-                    f"Activity wait completed: {len(done)} done, {len(pending)} pending"
-                )
-
-                # Update DB for completed tasks
-                for completed in done:
-                    # Map completed handle back to ti_key
-                    ti_key = next(k for k, v in running_activities.items() if v == completed)
-
-                    workflow.logger.info(f"Processing completed activity for {ti_key}")
-
-                    try:
-                        result: TaskExecutionResult = completed.result()
-                        workflow.logger.info(f"Activity result retrieved for {ti_key}")
-
-                        workflow.logger.info(
-                            f"Activity completed for {ti_key}: state={result.state}"
-                        )
-
-                        # Decision 7: Store XCom in workflow state
-                        if result.xcom_data:
-                            self.xcom_store[ti_key] = result.xcom_data
-
-                        await self._handle_activity_result(ti_key, result)
-
-                        # TODO Phase 5: Release pool slot
-
-                    except ActivityError as e:
-                        workflow.logger.error(
-                            f"ActivityError caught for {ti_key}: {e.message}, cause type: {type(e.cause)}"
-                        )
-
-                        # Check if the cause is an ApplicationError
-                        if isinstance(e.cause, ApplicationError):
-                            app_error = e.cause
-
-                            # Parse failure details from ApplicationError
-                            # Details are serialized as dicts by Temporal's converter
-                            if app_error.details and len(app_error.details) > 0:
-                                failure_data = app_error.details[0]
-
-                                # Deserialize dict to Pydantic model
-                                if isinstance(failure_data, dict):
-                                    failure_details = TaskExecutionFailureDetails(**failure_data)
-                                elif isinstance(failure_details, TaskExecutionFailureDetails):
-                                    failure_details = failure_data
-                                else:
-                                    workflow.logger.error(
-                                        f"ApplicationError for {ti_key} has unexpected details type: {type(failure_data)}"
-                                    )
-                                    failure_details = None
-
-                                if failure_details:
-                                    # Create failed result to update TaskInstance
-                                    failed_result = TaskExecutionResult(
-                                        dag_id=failure_details.dag_id,
-                                        task_id=failure_details.task_id,
-                                        run_id=failure_details.run_id,
-                                        try_number=failure_details.try_number,
-                                        state=TaskInstanceState.FAILED,
-                                        start_date=failure_details.start_date,
-                                        end_date=failure_details.end_date,
-                                        error_message=failure_details.error_message,
-                                    )
-
-                                    await self._handle_activity_result(ti_key, failed_result)
-                            else:
-                                workflow.logger.error(
-                                    f"ApplicationError for {ti_key} missing details"
-                                )
-                        else:
-                            workflow.logger.error(
-                                f"Activity failed for {ti_key} with non-ApplicationError cause: {type(e.cause)}"
-                            )
-
-                        # TODO Phase 5: Release pool slot
-
-                    except Exception as e:
-                        workflow.logger.error(
-                            f"Unexpected error for {ti_key}: {type(e).__name__}: {e}"
-                        )
-
-                    del running_activities[ti_key]
-            else:
-                # No running activities, sleep before checking for new work
-                await asyncio.sleep(5)
-
-        # Check if we broke out of loop due to completion
-        if final_state:
-            return final_state
-
-        workflow.logger.error("Max iterations reached!")
-        return "failed"
+            # Wait for completions
+            completed_keys = await self._await_and_process_completions(running_activities)
+            for key in completed_keys:
+                del running_activities[key]
