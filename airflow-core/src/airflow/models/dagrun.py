@@ -595,6 +595,7 @@ class DagRun(Base, LoggingMixin):
             select(cls)
             .with_hint(cls, "USE INDEX (idx_dag_run_running_dags)", dialect_name="mysql")
             .where(cls.state == DagRunState.RUNNING)
+            .where(cls.run_type != DagRunType.EXTERNAL)  # Skip externally managed runs (e.g., Temporal)
             .join(DagModel, DagModel.dag_id == cls.dag_id)
             .join(BackfillDagRun, BackfillDagRun.dag_run_id == DagRun.id, isouter=True)
             .where(
@@ -646,6 +647,7 @@ class DagRun(Base, LoggingMixin):
         query = (
             select(cls)
             .where(cls.state == DagRunState.QUEUED)
+            .where(cls.run_type != DagRunType.EXTERNAL)  # Skip externally managed runs (e.g., Temporal)
             .join(
                 DagModel,
                 and_(

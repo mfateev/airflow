@@ -29,6 +29,7 @@ class DagRunType(str, enum.Enum):
     SCHEDULED = "scheduled"
     MANUAL = "manual"
     ASSET_TRIGGERED = "asset_triggered"
+    EXTERNAL = "external"  # Externally managed execution (e.g., Temporal)
 
     def __str__(self) -> str:
         return self.value
