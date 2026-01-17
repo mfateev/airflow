@@ -83,6 +83,7 @@ from airflow.api_fastapi.core_api.services.public.dag_run import DagRunWaiter
 from airflow.api_fastapi.logging.decorators import action_logging
 from airflow.listeners.listener import get_listener_manager
 from airflow.models import DagModel, DagRun
+from airflow.orchestrators import get_orchestrator
 from airflow.models.asset import AssetEvent
 from airflow.models.dag_version import DagVersion
 from airflow.utils.state import DagRunState
@@ -484,6 +485,11 @@ def trigger_dag_run(
         if dag_run_note:
             current_user_id = user.get_id()
             dag_run.note = (dag_run_note, current_user_id)
+
+        # Route execution to the configured orchestrator (e.g., Temporal)
+        orchestrator = get_orchestrator()
+        orchestrator.start_dagrun(dag_run, session)
+
         return dag_run
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
