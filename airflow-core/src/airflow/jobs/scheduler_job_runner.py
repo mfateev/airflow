@@ -75,6 +75,7 @@ from airflow.models.dag_version import DagVersion
 from airflow.models.dagbag import DBDagBag
 from airflow.models.dagbundle import DagBundleModel
 from airflow.models.dagrun import DagRun
+from airflow.orchestrators import get_orchestrator
 from airflow.models.dagwarning import DagWarning, DagWarningType
 from airflow.models.pool import normalize_pool_name_for_stats
 from airflow.models.serialized_dag import SerializedDagModel
@@ -1717,6 +1718,9 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             apdr.created_dag_run_id = dag_run.id
             session.flush()
 
+            # Route execution to the configured orchestrator
+            get_orchestrator().start_dagrun(dag_run, session)
+
         return partition_dag_ids
 
     @retry_db_transaction
@@ -1836,7 +1840,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             # instead of falling in a loop of IntegrityError.
             if (serdag.dag_id, dag_model.next_dagrun) not in existing_dagruns:
                 try:
-                    serdag.create_dagrun(
+                    dag_run = serdag.create_dagrun(
                         run_id=serdag.timetable.generate_run_id(
                             run_type=DagRunType.SCHEDULED,
                             run_after=timezone.coerce_datetime(dag_model.next_dagrun),
@@ -1852,6 +1856,9 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                         session=session,
                     )
                     active_runs_of_dags[serdag.dag_id] += 1
+
+                    # Route execution to the configured orchestrator
+                    get_orchestrator().start_dagrun(dag_run, session)
 
                 # Exceptions like ValueError, ParamValidationError, etc. are raised by
                 # DagModel.create_dagrun() when dag is misconfigured. The scheduler should not
@@ -1950,6 +1957,9 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             Stats.incr("asset.triggered_dagruns")
             dag_run.consumed_asset_events.extend(asset_events)
             session.execute(delete(AssetDagRunQueue).where(AssetDagRunQueue.target_dag_id == dag_run.dag_id))
+
+            # Route execution to the configured orchestrator
+            get_orchestrator().start_dagrun(dag_run, session)
 
     def _lock_backfills(self, dag_runs: Collection[DagRun], session: Session) -> dict[int, Backfill]:
         """
