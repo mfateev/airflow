@@ -24,7 +24,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from airflow.models.dag import DagModel
     from airflow.models.dagrun import DagRun
+    from airflow.timetables.base import DataInterval
 
 
 class BaseDagRunOrchestrator(ABC):
@@ -73,6 +75,71 @@ class BaseDagRunOrchestrator(ABC):
 
         :param dag_run: The DagRun to cancel
         :param session: Database session for any DB operations
+        """
+        pass
+
+    def should_schedule_dagrun(
+        self,
+        dag_model: DagModel,
+        data_interval: DataInterval,
+        session: Session,
+    ) -> bool:
+        """
+        Check if the scheduler should create a DagRun for this scheduled execution.
+
+        Called by the scheduler BEFORE creating a DagRun when a DAG's
+        next_dagrun_create_after time has been reached. This allows orchestrators
+        that implement native scheduling (like Temporal) to bypass Airflow's
+        DagRun creation and handle scheduling themselves.
+
+        When this method returns False:
+        - Scheduler will NOT create a DagRun
+        - Scheduler WILL still update dag_model.next_dagrun fields
+        - Orchestrator is responsible for triggering execution at the right time
+
+        When this method returns True (default):
+        - Scheduler creates DagRun as normal
+        - Scheduler calls start_dagrun() after creation
+
+        This is not an abstract method because most orchestrators will use the
+        default behavior (return True). Only orchestrators with native scheduling
+        capabilities need to override this.
+
+        :param dag_model: The DagModel for the DAG being scheduled
+        :param data_interval: The data interval for the potential DagRun
+        :param session: Database session for any DB operations
+        :return: True if scheduler should create DagRun, False to skip
+        """
+        return True
+
+    def sync_pause_state(self, dag_id: str, is_paused: bool) -> None:
+        """
+        Sync DAG pause state to external systems.
+
+        Called when a DAG's is_paused state changes in the Airflow UI/API.
+        For orchestrators with native scheduling (like Temporal), this allows
+        pausing/unpausing the external schedule to match Airflow's state.
+
+        Default implementation is a no-op. Orchestrators with native scheduling
+        should override this to sync pause state to their scheduling system.
+
+        :param dag_id: The DAG ID whose pause state changed
+        :param is_paused: True if DAG was paused, False if unpaused
+        """
+        pass
+
+    def on_dag_deleted(self, dag_id: str) -> None:
+        """
+        Handle DAG deletion cleanup.
+
+        Called when a DAG is deleted from Airflow. For orchestrators with
+        native scheduling (like Temporal), this allows deleting the external
+        schedule that was created for this DAG.
+
+        Default implementation is a no-op. Orchestrators with native scheduling
+        should override this to clean up their scheduling resources.
+
+        :param dag_id: The DAG ID that was deleted
         """
         pass
 

@@ -29,6 +29,7 @@ from airflow.exceptions import AirflowException, DagNotFound
 from airflow.models import DagModel, DagRun
 from airflow.models.errors import ParseImportError
 from airflow.models.taskinstance import TaskInstance
+from airflow.orchestrators import get_orchestrator
 from airflow.utils.db import get_sqla_model_classes
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.state import TaskInstanceState
@@ -90,5 +91,9 @@ def delete_dag(dag_id: str, keep_records_in_log: bool = True, session: Session =
         )
         .execution_options(synchronize_session="fetch")
     )
+
+    # Notify orchestrator of DAG deletion (for native scheduling cleanup)
+    orchestrator = get_orchestrator()
+    orchestrator.on_dag_deleted(dag_id)
 
     return count

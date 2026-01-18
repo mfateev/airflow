@@ -76,6 +76,7 @@ from airflow.exceptions import AirflowException, DagNotFound
 from airflow.models import DagModel
 from airflow.models.dag_favorite import DagFavorite
 from airflow.models.dagrun import DagRun
+from airflow.orchestrators import get_orchestrator
 from airflow.utils.state import DagRunState
 
 dags_router = AirflowRouter(tags=["DAG"], prefix="/dags")
@@ -297,6 +298,11 @@ def patch_dag(
     for key, val in data.items():
         setattr(dag, key, val)
 
+    # Notify orchestrator of pause state change (for native scheduling sync)
+    if "is_paused" in data:
+        orchestrator = get_orchestrator()
+        orchestrator.sync_pause_state(dag_id, data["is_paused"])
+
     return dag
 
 
@@ -358,6 +364,11 @@ def patch_dags(
         .values(is_paused=patch_body.is_paused)
         .execution_options(synchronize_session="fetch")
     )
+
+    # Notify orchestrator of pause state change for each DAG (for native scheduling sync)
+    orchestrator = get_orchestrator()
+    for dag_id in dags_to_update:
+        orchestrator.sync_pause_state(dag_id, patch_body.is_paused)
 
     return DAGCollectionResponse(
         dags=dags,
