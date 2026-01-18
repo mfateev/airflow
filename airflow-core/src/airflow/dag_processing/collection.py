@@ -54,6 +54,7 @@ from airflow.models.dagrun import DagRun
 from airflow.models.dagwarning import DagWarningType
 from airflow.models.errors import ParseImportError
 from airflow.models.trigger import Trigger
+from airflow.orchestrators import get_orchestrator
 from airflow.serialization.definitions.assets import (
     SerializedAsset,
     SerializedAssetAlias,
@@ -536,10 +537,24 @@ class DagModelOperation(NamedTuple):
                     t.max_active_tis_per_dag is not None or t.max_active_tis_per_dagrun is not None
                     for t in dag.tasks
                 )
-            dm.timetable_summary = dag.timetable.summary
-            dm.timetable_type = dag.timetable.type_name
+
+            # Detect timetable changes before updating
+            old_timetable_summary = dm.timetable_summary
+            old_timetable_type = dm.timetable_type
+            new_timetable_summary = dag.timetable.summary
+            new_timetable_type = dag.timetable.type_name
+
+            dm.timetable_summary = new_timetable_summary
+            dm.timetable_type = new_timetable_type
             dm.timetable_description = dag.timetable.description
             dm.fail_fast = dag.fail_fast if dag.fail_fast is not None else False
+
+            # Notify orchestrator if timetable changed (for native scheduling sync)
+            if old_timetable_summary != new_timetable_summary or old_timetable_type != new_timetable_type:
+                # Only notify if this is an existing DAG (old values were set)
+                if old_timetable_summary is not None or old_timetable_type is not None:
+                    orchestrator = get_orchestrator()
+                    orchestrator.on_timetable_changed(dm, session)
 
             dm.bundle_name = self.bundle_name
             dm.bundle_version = self.bundle_version

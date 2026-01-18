@@ -143,6 +143,22 @@ class BaseDagRunOrchestrator(ABC):
         """
         pass
 
+    def on_timetable_changed(self, dag_model: DagModel, session: Session) -> None:
+        """
+        Handle DAG timetable/schedule change.
+
+        Called when a DAG's timetable changes (detected during DAG parsing).
+        For orchestrators with native scheduling (like Temporal), this allows
+        updating the external schedule to match the new timetable.
+
+        Default implementation is a no-op. Orchestrators with native scheduling
+        should override this to update their scheduling configuration.
+
+        :param dag_model: The DagModel with updated timetable information
+        :param session: Database session for any DB operations
+        """
+        pass
+
 
 class DefaultOrchestrator(BaseDagRunOrchestrator):
     """
