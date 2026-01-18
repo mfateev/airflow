@@ -1830,6 +1830,19 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                 continue
 
             data_interval = get_next_data_interval(serdag.timetable, dag_model)
+
+            # Check if orchestrator handles scheduling natively (e.g., Temporal Schedules).
+            # If so, skip DagRun creation - the orchestrator will trigger execution directly.
+            orchestrator = get_orchestrator()
+            if not orchestrator.should_schedule_dagrun(dag_model, data_interval, session):
+                self.log.info(
+                    "Orchestrator handles scheduling for DAG %s; skipping DagRun creation",
+                    dag_model.dag_id,
+                )
+                # Still update next_dagrun fields so scheduler checks again at the right time
+                dag_model.calculate_dagrun_date_fields(dag=serdag, last_automated_dag_run=data_interval)
+                continue
+
             # Explicitly check if the DagRun already exists. This is an edge case
             # where a Dag Run is created but `DagModel.next_dagrun` and `DagModel.next_dagrun_create_after`
             # are not updated.
@@ -1858,7 +1871,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                     active_runs_of_dags[serdag.dag_id] += 1
 
                     # Route execution to the configured orchestrator
-                    get_orchestrator().start_dagrun(dag_run, session)
+                    orchestrator.start_dagrun(dag_run, session)
 
                 # Exceptions like ValueError, ParamValidationError, etc. are raised by
                 # DagModel.create_dagrun() when dag is misconfigured. The scheduler should not
