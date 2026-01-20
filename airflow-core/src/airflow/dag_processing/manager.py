@@ -324,7 +324,12 @@ class DagFileProcessorManager(LoggingMixin):
             file_info = DagFileInfo(rel_path=Path(dag.relative_fileloc), bundle_name=dag.bundle_name)
             if last_finish_time := last_parsed.get(file_info, None):
                 if dag.last_parsed_time + timedelta(seconds=self.stale_dag_threshold) < last_finish_time:
-                    self.log.info("DAG %s is missing and will be deactivated.", dag.dag_id)
+                    self.log.info(
+                        "Deactivating stale DAG %s. Not parsed for %s seconds (last parsed: %s).",
+                        dag.dag_id,
+                        int((last_finish_time - dag.last_parsed_time).total_seconds()),
+                        dag.last_parsed_time,
+                    )
                     to_deactivate.add(dag.dag_id)
 
         if to_deactivate:
@@ -1211,13 +1216,16 @@ def process_parse_results(
             files_parsed = {(bundle_name, relative_fileloc)}
             files_parsed.update(import_errors.keys())
 
+        if (warnings := parsing_result.warnings) and isinstance(warnings[0], dict):
+            warnings = [DagWarning(**warn) for warn in warnings]
+
         update_dag_parsing_results_in_db(
             bundle_name=bundle_name,
             bundle_version=bundle_version,
             dags=parsing_result.serialized_dags,
             import_errors=import_errors,
             parse_duration=run_duration,
-            warnings=set(parsing_result.warnings or []),
+            warnings=set(warnings or []),
             session=session,
             files_parsed=files_parsed,
         )
